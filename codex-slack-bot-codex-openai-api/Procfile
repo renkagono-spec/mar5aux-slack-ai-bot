@@ -1,0 +1,1 @@
+web: uvicorn slack_ai_bot.app:app --host 0.0.0.0 --port ${PORT:-8080}
