@@ -82,6 +82,9 @@ def create_app() -> FastAPI:
                 "followup_question_resolution",
                 "bot_request_exclusion",
                 "ai_followup_rewrite",
+                "hybrid_search_ranking",
+                "slack_link_thread_lookup",
+                "joined_channel_bulk_backfill",
             ],
             "missing": settings.missing_required_values,
         }

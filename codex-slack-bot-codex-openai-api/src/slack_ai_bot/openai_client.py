@@ -43,6 +43,8 @@ class OpenAIClient:
             "'4/27 ni hanasareta', 'posts from 4/27', 'that day', 'yesterday', or asks what was discussed. "
             "Do not treat 4/27 as a date when it looks like a ratio, product number, size, count, or code. "
             "Use JST dates. If a year is omitted, use the year from today_jst. "
+            "Always extract important Japanese nouns, person names, channel-like words, project names, and topic words into keywords. "
+            "For questions about who/when/where, include the subject person and topic in keywords even when a date filter is used. "
             "JSON schema: "
             "{"
             "\"date_intent\": true|false, "

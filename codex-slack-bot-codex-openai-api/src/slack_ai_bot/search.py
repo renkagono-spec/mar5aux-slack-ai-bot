@@ -36,6 +36,8 @@ THREAD_MEMORY_HINTS = (
     "\u51fa\u3057\u3066",
     "\u3082\u3046\u4e00\u56de",
 )
+SLACK_LINK_RE = re.compile(r"/archives/([A-Z0-9]+)/p(\d{10})(\d{6})")
+SLACK_THREAD_TS_RE = re.compile(r"[?&]thread_ts=(\d+\.\d+)")
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,13 @@ class SearchPlan:
     keywords: list[str]
     person_names: list[str]
     channel_names: list[str]
+
+
+@dataclass(frozen=True)
+class SlackMessageLink:
+    channel_id: str
+    ts: str
+    thread_ts: str | None = None
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -68,13 +77,39 @@ def keyword_tokens(text: str) -> set[str]:
     return {token for token in re.split(split_pattern, lowered) if len(token) >= 2}
 
 
+def message_search_text(message: StoredMessage) -> str:
+    parts = [
+        message.channel_name or "",
+        message.user_name or "",
+        message.text,
+    ]
+    return "\n".join(part for part in parts if part)
+
+
 def keyword_score(query: str, message: StoredMessage) -> float:
     query_tokens = keyword_tokens(query)
     if not query_tokens:
         return 0.0
-    text_tokens = keyword_tokens(message.text)
+    text = message_search_text(message).lower()
+    text_tokens = keyword_tokens(text)
     overlap = query_tokens & text_tokens
-    return len(overlap) / max(len(query_tokens), 1)
+    overlap_score = len(overlap) / max(len(query_tokens), 1)
+    substring_hits = sum(1 for token in query_tokens if token in text)
+    substring_score = substring_hits / max(len(query_tokens), 1)
+    return max(overlap_score, substring_score)
+
+
+def parse_slack_message_link(text: str) -> SlackMessageLink | None:
+    match = SLACK_LINK_RE.search(text or "")
+    if not match:
+        return None
+    channel_id, seconds, micros = match.groups()
+    thread_match = SLACK_THREAD_TS_RE.search(text or "")
+    return SlackMessageLink(
+        channel_id=channel_id,
+        ts=f"{seconds}.{micros}",
+        thread_ts=thread_match.group(1) if thread_match else None,
+    )
 
 
 def message_key(message: StoredMessage) -> tuple[str, str, str]:
@@ -97,6 +132,75 @@ def message_datetime_jst(message: StoredMessage) -> str:
 
 def thread_root_ts(message: StoredMessage) -> str:
     return message.thread_ts or message.ts
+
+
+def build_search_query(question: str, plan: SearchPlan) -> str:
+    parts = [question]
+    if plan.keywords:
+        parts.append("keywords: " + " ".join(plan.keywords))
+    if plan.person_names:
+        parts.append("people: " + " ".join(plan.person_names))
+    if plan.channel_names:
+        parts.append("channels: " + " ".join(plan.channel_names))
+    if plan.start_date and plan.end_date:
+        parts.append(f"date: {plan.start_date} to {plan.end_date}")
+    return "\n".join(parts)
+
+
+def string_contains_any(text: str | None, needles: list[str]) -> bool:
+    lowered = (text or "").lower()
+    return any(needle.lower() in lowered for needle in needles if needle)
+
+
+def metadata_score(plan: SearchPlan, message: StoredMessage) -> float:
+    score = 0.0
+    text = message_search_text(message)
+
+    if plan.channel_names and string_contains_any(message.channel_name, plan.channel_names):
+        score += 0.25
+    if plan.person_names and (
+        string_contains_any(message.user_name, plan.person_names)
+        or string_contains_any(text, plan.person_names)
+    ):
+        score += 0.35
+    if plan.keywords:
+        score += min(keyword_score(" ".join(plan.keywords), message), 0.4)
+
+    return min(score, 1.0)
+
+
+def hybrid_score(
+    query: str,
+    message: StoredMessage,
+    plan: SearchPlan,
+    query_embedding: list[float] | None,
+) -> float:
+    embedding = 0.0
+    if query_embedding and message.embedding:
+        embedding = max(cosine_similarity(query_embedding, message.embedding), 0.0)
+
+    keyword = keyword_score(query, message)
+    metadata = metadata_score(plan, message)
+
+    if query_embedding and message.embedding:
+        return (embedding * 0.72) + (keyword * 0.18) + (metadata * 0.10)
+    return (keyword * 0.75) + (metadata * 0.25)
+
+
+def select_top_thread_hits(scored: list[tuple[float, StoredMessage]], limit: int) -> list[StoredMessage]:
+    hits: list[StoredMessage] = []
+    seen_threads: set[tuple[str, str, str]] = set()
+
+    for _, message in scored:
+        key = (message.workspace_id, message.channel_id, thread_root_ts(message))
+        if key in seen_threads:
+            continue
+        seen_threads.add(key)
+        hits.append(message)
+        if len(hits) >= limit:
+            break
+
+    return hits
 
 
 def contains_excluded_mention(message: StoredMessage, excluded_mention_ids: set[str] | None) -> bool:
@@ -256,6 +360,17 @@ def search_messages(
     current_ts: str | None = None,
     excluded_mention_ids: set[str] | None = None,
 ) -> list[StoredMessage]:
+    linked_message = parse_slack_message_link(question)
+    if linked_message:
+        direct = storage.list_thread_messages(
+            workspace_id=workspace_id,
+            channel_id=linked_message.channel_id,
+            thread_ts=linked_message.thread_ts or linked_message.ts,
+        )
+        direct = exclude_mentioned_messages(direct, excluded_mention_ids)
+        if direct:
+            return direct
+
     thread_memory = thread_memory_messages(
         workspace_id=workspace_id,
         channel_id=channel_id,
@@ -280,30 +395,22 @@ def search_messages(
     if not candidates:
         return []
 
+    search_query = build_search_query(question, plan)
     query_embedding: list[float] | None = None
     try:
-        query_embedding = openai_client.create_embedding(question)
+        query_embedding = openai_client.create_embedding(search_query)
     except Exception:
         logging.exception("failed to create search embedding")
 
     scored: list[tuple[float, StoredMessage]] = []
-
-    if query_embedding:
-        for message in candidates:
-            if message.embedding:
-                score = cosine_similarity(query_embedding, message.embedding)
-                if score > 0:
-                    scored.append((score, message))
-
-    if not scored:
-        for message in candidates:
-            score = keyword_score(question, message)
-            if score > 0:
-                scored.append((score, message))
+    for message in candidates:
+        score = hybrid_score(search_query, message, plan, query_embedding)
+        if score > 0:
+            scored.append((score, message))
 
     if scored:
         scored.sort(key=lambda item: item[0], reverse=True)
-        hits = [message for _, message in scored[: settings.max_context_messages]]
+        hits = select_top_thread_hits(scored, settings.max_context_messages)
     elif plan.date_intent:
         hits = sorted(candidates, key=message_sort_key)[: settings.max_context_messages]
     else:
