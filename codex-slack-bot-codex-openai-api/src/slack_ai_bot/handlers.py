@@ -14,6 +14,31 @@ from .storage import Storage, StoredMessage
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
 CITATION_RE = re.compile(r"\[(\d{1,3})\]")
 REFERENCE_LINKS_LABEL = "\u53c2\u7167\u30ea\u30f3\u30af"
+FOLLOWUP_ONLY_HINTS = (
+    "\u3088\u308d\u3057\u304f",
+    "\u304a\u9858\u3044",
+    "\u304a\u306d\u304c\u3044",
+    "\u983c\u3080",
+    "\u305f\u306e\u3080",
+    "\u3084\u3063\u3066",
+    "\u305d\u308c\u3067",
+    "\u305d\u308c\u304a\u9858\u3044",
+)
+SUBSTANTIVE_REQUEST_HINTS = (
+    "?",
+    "\uff1f",
+    "4/",
+    "\u6559\u3048\u3066",
+    "\u63a2\u3057\u3066",
+    "\u307e\u3068\u3081",
+    "\u8981\u7d04",
+    "\u6982\u8981",
+    "\u5185\u5bb9",
+    "\u8ab0",
+    "\u4f55",
+    "\u3044\u3064",
+    "\u3069\u3053",
+)
 
 
 def workspace_id_from_payload(payload: dict[str, Any], event: dict[str, Any]) -> str:
@@ -28,6 +53,61 @@ def workspace_id_from_payload(payload: dict[str, Any], event: dict[str, Any]) ->
 def clean_question(text: str) -> str:
     cleaned = MENTION_RE.sub("", text or "").strip()
     return cleaned or "Summarize the relevant information in this thread or channel."
+
+
+def compact_text(text: str) -> str:
+    return re.sub(r"[\s\u3000\u3001\u3002,.!?\uff01\uff1f]+", "", text or "").lower()
+
+
+def ts_as_float(ts: str | None) -> float:
+    try:
+        return float(ts or "0")
+    except ValueError:
+        return 0.0
+
+
+def is_followup_only_question(question: str) -> bool:
+    compact = compact_text(clean_question(question))
+    if not compact:
+        return False
+    if any(hint in compact for hint in SUBSTANTIVE_REQUEST_HINTS):
+        return False
+    return len(compact) <= 24 and any(hint in compact for hint in FOLLOWUP_ONLY_HINTS)
+
+
+def is_substantive_user_request(text: str) -> bool:
+    cleaned = clean_question(text)
+    if is_followup_only_question(cleaned):
+        return False
+    if any(hint in cleaned for hint in SUBSTANTIVE_REQUEST_HINTS):
+        return True
+    return len(compact_text(cleaned)) >= 14
+
+
+def latest_previous_user_request(messages: list[StoredMessage], current_ts: str | None) -> str | None:
+    current = ts_as_float(current_ts)
+    for message in sorted(messages, key=lambda item: ts_as_float(item.ts), reverse=True):
+        if current and ts_as_float(message.ts) >= current:
+            continue
+        if message.source_type == "bot_message" or not message.user_id:
+            continue
+        if not is_substantive_user_request(message.text):
+            continue
+        return clean_question(message.text)
+    return None
+
+
+def resolve_effective_question(
+    question: str,
+    current_thread_messages: list[StoredMessage],
+    current_ts: str | None,
+) -> tuple[str, bool]:
+    if not current_thread_messages or not is_followup_only_question(question):
+        return question, False
+    previous_question = latest_previous_user_request(current_thread_messages, current_ts)
+    if not previous_question:
+        return question, False
+    return previous_question, True
 
 
 def should_store_message(event: dict[str, Any], own_bot_id: str | None) -> bool:
@@ -284,6 +364,7 @@ def handle_app_mention(
     slack_client.add_reaction(channel_id, event["ts"], "eyes")
 
     try:
+        current_thread_messages: list[StoredMessage] = []
         if event.get("thread_ts"):
             store_thread_by_ts(
                 payload,
@@ -294,16 +375,29 @@ def handle_app_mention(
                 openai_client,
                 settings,
             )
+            current_thread_messages = storage.list_thread_messages(
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                thread_ts=event["thread_ts"],
+            )
+
+        effective_question, inherited_question = resolve_effective_question(
+            question,
+            current_thread_messages,
+            event.get("ts"),
+        )
+        excluded_mention_ids = {mention_id for mention_id in [slack_client.own_user_id()] if mention_id}
 
         matches = search_messages(
-            question=question,
+            question=effective_question,
             workspace_id=workspace_id,
             channel_id=channel_id,
             settings=settings,
             storage=storage,
             openai_client=openai_client,
-            thread_ts=event.get("thread_ts"),
-            current_ts=event.get("ts"),
+            thread_ts=event.get("thread_ts") if not inherited_question else None,
+            current_ts=event.get("ts") if not inherited_question else None,
+            excluded_mention_ids=excluded_mention_ids,
         )
 
         if not matches:
@@ -315,8 +409,28 @@ def handle_app_mention(
             return
 
         matches = refresh_threads_for_matches(payload, matches, storage, slack_client, openai_client, settings)
+        if excluded_mention_ids:
+            matches = [
+                message
+                for message in matches
+                if not any(f"<@{mention_id}>" in message.text for mention_id in excluded_mention_ids)
+            ]
+        if not matches:
+            slack_client.post_message(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text="\u691c\u7d22\u3067\u304d\u308b\u53c2\u7167\u5143\u304c\u898b\u3064\u304b\u308a\u307e\u305b\u3093\u3067\u3057\u305f\u3002bot\u3078\u306e\u4f9d\u983c\u6587\u3067\u306f\u306a\u304f\u3001\u5b9f\u969b\u306eSlack\u6295\u7a3f\u304cDB\u306b\u5165\u3063\u3066\u3044\u308b\u304b\u78ba\u8a8d\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
+            )
+            return
         context = format_context(matches, max_chars=settings.max_context_chars)
-        answer = openai_client.answer_question(question, context)
+        answer_question_text = effective_question
+        if inherited_question:
+            answer_question_text = (
+                f"{effective_question}\n\n"
+                "The latest Slack reply was only a short follow-up. "
+                "Answer the request above directly. Do not summarize the follow-up or the request itself."
+            )
+        answer = openai_client.answer_question(answer_question_text, context)
         answer_with_links = answer.rstrip() + format_evidence_links(answer, matches)
         slack_client.post_message(channel=channel_id, thread_ts=thread_ts, text=answer_with_links[:39000])
     except Exception:

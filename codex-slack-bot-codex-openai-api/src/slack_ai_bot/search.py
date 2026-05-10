@@ -14,6 +14,8 @@ from .storage import Storage, StoredMessage
 
 JST = ZoneInfo("Asia/Tokyo")
 THREAD_MEMORY_HINTS = (
+    "\u3053\u306e\u30b9\u30ec\u30c3\u30c9",
+    "\u30b9\u30ec\u30c3\u30c9",
     "\u3055\u3063\u304d",  # sakki
     "\u3055\u304d\u307b\u3069",
     "\u3055\u3063\u304d\u306e",
@@ -30,11 +32,8 @@ THREAD_MEMORY_HINTS = (
     "\u6c7a\u307e\u3063\u305f",
     "\u30bf\u30b9\u30af",
     "\u672a\u5bfe\u5fdc",
-    "\u304a\u9858\u3044",
-    "\u304a\u306d\u304c\u3044",
     "\u8a73\u3057\u304f",
     "\u51fa\u3057\u3066",
-    "\u3084\u3063\u3066",
     "\u3082\u3046\u4e00\u56de",
 )
 
@@ -100,12 +99,25 @@ def thread_root_ts(message: StoredMessage) -> str:
     return message.thread_ts or message.ts
 
 
+def contains_excluded_mention(message: StoredMessage, excluded_mention_ids: set[str] | None) -> bool:
+    if not excluded_mention_ids:
+        return False
+    return any(f"<@{mention_id}>" in message.text for mention_id in excluded_mention_ids)
+
+
+def exclude_mentioned_messages(
+    messages: list[StoredMessage],
+    excluded_mention_ids: set[str] | None,
+) -> list[StoredMessage]:
+    if not excluded_mention_ids:
+        return messages
+    return [message for message in messages if not contains_excluded_mention(message, excluded_mention_ids)]
+
+
 def should_use_thread_memory(question: str, thread_ts: str | None, current_ts: str | None) -> bool:
     if not thread_ts or thread_ts == current_ts:
         return False
     lowered = question.lower()
-    if len(lowered) <= 80:
-        return True
     return any(hint in lowered for hint in THREAD_MEMORY_HINTS)
 
 
@@ -192,6 +204,7 @@ def expand_context_messages(
     storage: Storage,
     settings: Settings,
     plan: SearchPlan,
+    excluded_mention_ids: set[str] | None = None,
 ) -> list[StoredMessage]:
     expanded: list[StoredMessage] = []
     seen: set[tuple[str, str, str]] = set()
@@ -221,6 +234,8 @@ def expand_context_messages(
             group.append(hit)
 
         for message in sorted(group, key=message_sort_key):
+            if contains_excluded_mention(message, excluded_mention_ids):
+                continue
             key = message_key(message)
             if key in seen:
                 continue
@@ -239,6 +254,7 @@ def search_messages(
     openai_client: OpenAIClient,
     thread_ts: str | None = None,
     current_ts: str | None = None,
+    excluded_mention_ids: set[str] | None = None,
 ) -> list[StoredMessage]:
     thread_memory = thread_memory_messages(
         workspace_id=workspace_id,
@@ -249,7 +265,7 @@ def search_messages(
         storage=storage,
     )
     if thread_memory:
-        return thread_memory
+        return exclude_mentioned_messages(thread_memory, excluded_mention_ids)
 
     plan = plan_search(question, openai_client)
     candidates = storage.list_messages(
@@ -260,6 +276,7 @@ def search_messages(
         oldest_ts=plan.oldest_ts if plan.date_intent else None,
         latest_ts=plan.latest_ts if plan.date_intent else None,
     )
+    candidates = exclude_mentioned_messages(candidates, excluded_mention_ids)
     if not candidates:
         return []
 
@@ -292,7 +309,7 @@ def search_messages(
     else:
         hits = []
 
-    return expand_context_messages(hits, storage, settings, plan)
+    return expand_context_messages(hits, storage, settings, plan, excluded_mention_ids=excluded_mention_ids)
 
 
 def format_context(messages: list[StoredMessage], max_chars: int = 26000) -> str:

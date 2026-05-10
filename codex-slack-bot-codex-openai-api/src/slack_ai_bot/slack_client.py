@@ -12,6 +12,7 @@ class SlackClient:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._own_bot_id: str | None = settings.slack_own_bot_id
+        self._own_user_id: str | None = None
 
     @property
     def headers(self) -> dict[str, str]:
@@ -89,7 +90,19 @@ class SlackClient:
         try:
             response = self.auth_test()
             self._own_bot_id = response.get("bot_id")
+            self._own_user_id = response.get("user_id")
             return self._own_bot_id
+        except Exception:
+            return None
+
+    def own_user_id(self) -> str | None:
+        if self._own_user_id:
+            return self._own_user_id
+        try:
+            response = self.auth_test()
+            self._own_bot_id = response.get("bot_id") or self._own_bot_id
+            self._own_user_id = response.get("user_id")
+            return self._own_user_id
         except Exception:
             return None
 

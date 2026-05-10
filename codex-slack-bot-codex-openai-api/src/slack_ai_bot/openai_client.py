@@ -105,6 +105,7 @@ class OpenAIClient:
             "treat the supplied same-thread messages as short-term memory for that thread. "
             "Read thread_root, datetime_jst, timestamps, and neighboring messages before deciding the meaning. "
             "If a date-specific question includes later same-thread replies, distinguish the original day's discussion from later follow-ups. "
+            "Never answer by describing the user's request itself. If the Context only contains bot requests or meta discussion, say that source content was not found. "
             "Do not invent facts. If the evidence is insufficient, say what is missing. "
             "Attach source markers like [1] to important claims. "
             "Do not paste Slack URLs in the answer body; use only source markers such as [1]. "
