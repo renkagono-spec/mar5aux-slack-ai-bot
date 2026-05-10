@@ -14,22 +14,28 @@ from .storage import Storage, StoredMessage
 
 JST = ZoneInfo("Asia/Tokyo")
 THREAD_MEMORY_HINTS = (
-    "さっき",
-    "さきほど",
-    "さっきの",
-    "この件",
-    "この内容",
-    "上の",
-    "上記",
-    "それ",
-    "これ",
-    "今の",
-    "会議",
-    "要約",
-    "まとめ",
-    "決まった",
-    "タスク",
-    "未対応",
+    "\u3055\u3063\u304d",  # sakki
+    "\u3055\u304d\u307b\u3069",
+    "\u3055\u3063\u304d\u306e",
+    "\u3053\u306e\u4ef6",
+    "\u3053\u306e\u5185\u5bb9",
+    "\u4e0a\u306e",
+    "\u4e0a\u8a18",
+    "\u305d\u308c",
+    "\u3053\u308c",
+    "\u4eca\u306e",
+    "\u4f1a\u8b70",
+    "\u8981\u7d04",
+    "\u307e\u3068\u3081",
+    "\u6c7a\u307e\u3063\u305f",
+    "\u30bf\u30b9\u30af",
+    "\u672a\u5bfe\u5fdc",
+    "\u304a\u9858\u3044",
+    "\u304a\u306d\u304c\u3044",
+    "\u8a73\u3057\u304f",
+    "\u51fa\u3057\u3066",
+    "\u3084\u3063\u3066",
+    "\u3082\u3046\u4e00\u56de",
 )
 
 
@@ -98,6 +104,8 @@ def should_use_thread_memory(question: str, thread_ts: str | None, current_ts: s
     if not thread_ts or thread_ts == current_ts:
         return False
     lowered = question.lower()
+    if len(lowered) <= 80:
+        return True
     return any(hint in lowered for hint in THREAD_MEMORY_HINTS)
 
 

@@ -123,10 +123,25 @@ def store_thread_replies(
     if not channel_id or not parent_ts:
         return 0
 
+    return store_thread_by_ts(payload, channel_id, parent_ts, storage, slack_client, openai_client, settings)
+
+
+def store_thread_by_ts(
+    payload: dict[str, Any],
+    channel_id: str,
+    thread_ts: str,
+    storage: Storage,
+    slack_client: SlackClient,
+    openai_client: OpenAIClient,
+    settings: Settings,
+) -> int:
+    if not channel_id or not thread_ts:
+        return 0
+
     cursor = None
     stored = 0
     while True:
-        response = slack_client.conversation_replies(channel=channel_id, ts=parent_ts, cursor=cursor)
+        response = slack_client.conversation_replies(channel=channel_id, ts=thread_ts, cursor=cursor)
         for reply_event in response.get("messages") or []:
             reply_event.setdefault("channel", channel_id)
             message = message_from_event(payload, reply_event, slack_client, openai_client, settings)
@@ -138,6 +153,42 @@ def store_thread_replies(
         if not cursor:
             break
     return stored
+
+
+def refresh_threads_for_matches(
+    payload: dict[str, Any],
+    matches: list[StoredMessage],
+    storage: Storage,
+    slack_client: SlackClient,
+    openai_client: OpenAIClient,
+    settings: Settings,
+) -> list[StoredMessage]:
+    roots: list[tuple[str, str, str]] = []
+    seen_roots: set[tuple[str, str, str]] = set()
+
+    for message in matches[: settings.max_context_messages]:
+        root_ts = message.thread_ts or message.ts
+        key = (message.workspace_id, message.channel_id, root_ts)
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+        roots.append(key)
+        try:
+            store_thread_by_ts(payload, message.channel_id, root_ts, storage, slack_client, openai_client, settings)
+        except Exception:
+            logging.exception("failed to refresh matched thread")
+
+    refreshed: list[StoredMessage] = []
+    seen_messages: set[tuple[str, str, str]] = set()
+    for workspace_id, channel_id, root_ts in roots:
+        for message in storage.list_thread_messages(workspace_id, channel_id, root_ts):
+            key = (message.workspace_id, message.channel_id, message.ts)
+            if key in seen_messages:
+                continue
+            seen_messages.add(key)
+            refreshed.append(message)
+
+    return refreshed or matches
 
 
 def cited_message_indexes(answer: str, message_count: int) -> list[int]:
@@ -233,6 +284,17 @@ def handle_app_mention(
     slack_client.add_reaction(channel_id, event["ts"], "eyes")
 
     try:
+        if event.get("thread_ts"):
+            store_thread_by_ts(
+                payload,
+                channel_id,
+                event["thread_ts"],
+                storage,
+                slack_client,
+                openai_client,
+                settings,
+            )
+
         matches = search_messages(
             question=question,
             workspace_id=workspace_id,
@@ -252,6 +314,7 @@ def handle_app_mention(
             )
             return
 
+        matches = refresh_threads_for_matches(payload, matches, storage, slack_client, openai_client, settings)
         context = format_context(matches, max_chars=settings.max_context_chars)
         answer = openai_client.answer_question(question, context)
         answer_with_links = answer.rstrip() + format_evidence_links(answer, matches)

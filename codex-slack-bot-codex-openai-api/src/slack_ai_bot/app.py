@@ -78,6 +78,7 @@ def create_app() -> FastAPI:
                 "cited_evidence_links",
                 "ai_search_planning",
                 "thread_memory",
+                "live_thread_refresh",
             ],
             "missing": settings.missing_required_values,
         }
