@@ -1,12 +1,31 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import date, datetime, time
 import logging
 import math
 import re
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from .config import Settings
 from .openai_client import OpenAIClient
 from .storage import Storage, StoredMessage
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+@dataclass(frozen=True)
+class SearchPlan:
+    date_intent: bool
+    date_reason: str
+    start_date: str | None
+    end_date: str | None
+    oldest_ts: str | None
+    latest_ts: str | None
+    keywords: list[str]
+    person_names: list[str]
+    channel_names: list[str]
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -46,14 +65,83 @@ def message_sort_key(message: StoredMessage) -> float:
         return 0.0
 
 
+def message_datetime_jst(message: StoredMessage) -> str:
+    try:
+        return datetime.fromtimestamp(float(message.ts), JST).strftime("%Y-%m-%d %H:%M:%S JST")
+    except ValueError:
+        return "unknown"
+
+
 def thread_root_ts(message: StoredMessage) -> str:
     return message.thread_ts or message.ts
+
+
+def today_jst() -> str:
+    return datetime.now(JST).date().isoformat()
+
+
+def date_to_slack_ts(value: str) -> str:
+    day = date.fromisoformat(value)
+    at_midnight = datetime.combine(day, time.min, JST)
+    return str(at_midnight.timestamp())
+
+
+def safe_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def normalize_search_plan(raw_plan: dict[str, Any]) -> SearchPlan:
+    date_intent = bool(raw_plan.get("date_intent"))
+    start_date = raw_plan.get("start_date") if isinstance(raw_plan.get("start_date"), str) else None
+    end_date = raw_plan.get("end_date") if isinstance(raw_plan.get("end_date"), str) else None
+    oldest_ts = None
+    latest_ts = None
+
+    if date_intent and start_date and end_date:
+        try:
+            start = date.fromisoformat(start_date)
+            end = date.fromisoformat(end_date)
+            days = (end - start).days
+            if 0 < days <= 31:
+                oldest_ts = date_to_slack_ts(start_date)
+                latest_ts = date_to_slack_ts(end_date)
+            else:
+                date_intent = False
+                start_date = None
+                end_date = None
+        except ValueError:
+            date_intent = False
+            start_date = None
+            end_date = None
+
+    return SearchPlan(
+        date_intent=date_intent and bool(oldest_ts and latest_ts),
+        date_reason=str(raw_plan.get("date_reason") or ""),
+        start_date=start_date,
+        end_date=end_date,
+        oldest_ts=oldest_ts,
+        latest_ts=latest_ts,
+        keywords=safe_string_list(raw_plan.get("keywords")),
+        person_names=safe_string_list(raw_plan.get("person_names")),
+        channel_names=safe_string_list(raw_plan.get("channel_names")),
+    )
+
+
+def plan_search(question: str, openai_client: OpenAIClient) -> SearchPlan:
+    try:
+        return normalize_search_plan(openai_client.plan_search(question, today_jst()))
+    except Exception:
+        logging.exception("failed to create search plan")
+        return normalize_search_plan({"date_intent": False})
 
 
 def expand_context_messages(
     hits: list[StoredMessage],
     storage: Storage,
     settings: Settings,
+    plan: SearchPlan,
 ) -> list[StoredMessage]:
     expanded: list[StoredMessage] = []
     seen: set[tuple[str, str, str]] = set()
@@ -74,6 +162,8 @@ def expand_context_messages(
                 ts=hit.ts,
                 before=settings.context_neighbor_messages,
                 after=settings.context_neighbor_messages,
+                oldest_ts=plan.oldest_ts if plan.date_intent else None,
+                latest_ts=plan.latest_ts if plan.date_intent else None,
             )
         )
 
@@ -98,12 +188,17 @@ def search_messages(
     storage: Storage,
     openai_client: OpenAIClient,
 ) -> list[StoredMessage]:
+    plan = plan_search(question, openai_client)
     candidates = storage.list_messages(
         workspace_id=workspace_id,
         channel_id=channel_id,
         search_scope=settings.search_scope,
         limit=settings.max_search_rows,
+        oldest_ts=plan.oldest_ts if plan.date_intent else None,
+        latest_ts=plan.latest_ts if plan.date_intent else None,
     )
+    if not candidates:
+        return []
 
     query_embedding: list[float] | None = None
     try:
@@ -126,9 +221,15 @@ def search_messages(
             if score > 0:
                 scored.append((score, message))
 
-    scored.sort(key=lambda item: item[0], reverse=True)
-    hits = [message for _, message in scored[: settings.max_context_messages]]
-    return expand_context_messages(hits, storage, settings)
+    if scored:
+        scored.sort(key=lambda item: item[0], reverse=True)
+        hits = [message for _, message in scored[: settings.max_context_messages]]
+    elif plan.date_intent:
+        hits = sorted(candidates, key=message_sort_key)[: settings.max_context_messages]
+    else:
+        hits = []
+
+    return expand_context_messages(hits, storage, settings, plan)
 
 
 def format_context(messages: list[StoredMessage], max_chars: int = 26000) -> str:
@@ -148,7 +249,8 @@ def format_context(messages: list[StoredMessage], max_chars: int = 26000) -> str
             body = body[:2500] + "\n[message truncated]"
 
         entry = (
-            f"[{index}] {channel} {user} ts={message.ts} thread_root={root} source={message.source_type}\n"
+            f"[{index}] {channel} {user} datetime_jst={message_datetime_jst(message)} "
+            f"ts={message.ts} thread_root={root} source={message.source_type}\n"
             f"permalink: {permalink}\n"
             f"{body}"
         )

@@ -257,51 +257,55 @@ class Storage:
         channel_id: str | None,
         search_scope: str,
         limit: int,
+        oldest_ts: str | None = None,
+        latest_ts: str | None = None,
     ) -> list[StoredMessage]:
         channel_filter = search_scope == "channel" and channel_id
         with self.connect() as conn:
             if self.backend == "postgres":
+                conditions = ["workspace_id = %s", "is_deleted = FALSE"]
+                params: list[Any] = [workspace_id]
                 if channel_filter:
-                    rows = conn.execute(
-                        """
-                        SELECT * FROM messages
-                        WHERE workspace_id = %s AND channel_id = %s AND is_deleted = FALSE
-                        ORDER BY updated_at DESC
-                        LIMIT %s
-                        """,
-                        (workspace_id, channel_id, limit),
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        """
-                        SELECT * FROM messages
-                        WHERE workspace_id = %s AND is_deleted = FALSE
-                        ORDER BY updated_at DESC
-                        LIMIT %s
-                        """,
-                        (workspace_id, limit),
-                    ).fetchall()
+                    conditions.append("channel_id = %s")
+                    params.append(channel_id)
+                if oldest_ts:
+                    conditions.append("ts::double precision >= %s::double precision")
+                    params.append(oldest_ts)
+                if latest_ts:
+                    conditions.append("ts::double precision < %s::double precision")
+                    params.append(latest_ts)
+                params.append(limit)
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM messages
+                    WHERE {" AND ".join(conditions)}
+                    ORDER BY updated_at DESC
+                    LIMIT %s
+                    """,
+                    tuple(params),
+                ).fetchall()
             else:
+                conditions = ["workspace_id = ?", "is_deleted = 0"]
+                params = [workspace_id]
                 if channel_filter:
-                    rows = conn.execute(
-                        """
-                        SELECT * FROM messages
-                        WHERE workspace_id = ? AND channel_id = ? AND is_deleted = 0
-                        ORDER BY updated_at DESC
-                        LIMIT ?
-                        """,
-                        (workspace_id, channel_id, limit),
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        """
-                        SELECT * FROM messages
-                        WHERE workspace_id = ? AND is_deleted = 0
-                        ORDER BY updated_at DESC
-                        LIMIT ?
-                        """,
-                        (workspace_id, limit),
-                    ).fetchall()
+                    conditions.append("channel_id = ?")
+                    params.append(channel_id)
+                if oldest_ts:
+                    conditions.append("CAST(ts AS REAL) >= CAST(? AS REAL)")
+                    params.append(oldest_ts)
+                if latest_ts:
+                    conditions.append("CAST(ts AS REAL) < CAST(? AS REAL)")
+                    params.append(latest_ts)
+                params.append(limit)
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM messages
+                    WHERE {" AND ".join(conditions)}
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    tuple(params),
+                ).fetchall()
         return [self._row_to_message(row) for row in rows]
 
     def list_thread_messages(
@@ -344,6 +348,8 @@ class Storage:
         ts: str,
         before: int,
         after: int,
+        oldest_ts: str | None = None,
+        latest_ts: str | None = None,
     ) -> list[StoredMessage]:
         older: list[Any] = []
         newer: list[Any] = []
@@ -351,61 +357,101 @@ class Storage:
         with self.connect() as conn:
             if self.backend == "postgres":
                 if before > 0:
+                    oldest_clause = "AND ts::double precision >= %s::double precision" if oldest_ts else ""
+                    latest_clause = "AND ts::double precision < %s::double precision" if latest_ts else ""
+                    params: list[Any] = [workspace_id, channel_id, ts]
+                    if oldest_ts:
+                        params.append(oldest_ts)
+                    if latest_ts:
+                        params.append(latest_ts)
+                    params.append(before)
                     older = conn.execute(
-                        """
+                        f"""
                         SELECT * FROM messages
                         WHERE workspace_id = %s
                           AND channel_id = %s
                           AND is_deleted = FALSE
                           AND (thread_ts IS NULL OR thread_ts = ts)
                           AND ts::double precision < %s::double precision
+                          {oldest_clause}
+                          {latest_clause}
                         ORDER BY ts::double precision DESC
                         LIMIT %s
                         """,
-                        (workspace_id, channel_id, ts, before),
+                        tuple(params),
                     ).fetchall()
                 if after > 0:
+                    oldest_clause = "AND ts::double precision >= %s::double precision" if oldest_ts else ""
+                    latest_clause = "AND ts::double precision < %s::double precision" if latest_ts else ""
+                    params = [workspace_id, channel_id, ts]
+                    if oldest_ts:
+                        params.append(oldest_ts)
+                    if latest_ts:
+                        params.append(latest_ts)
+                    params.append(after)
                     newer = conn.execute(
-                        """
+                        f"""
                         SELECT * FROM messages
                         WHERE workspace_id = %s
                           AND channel_id = %s
                           AND is_deleted = FALSE
                           AND (thread_ts IS NULL OR thread_ts = ts)
                           AND ts::double precision > %s::double precision
+                          {oldest_clause}
+                          {latest_clause}
                         ORDER BY ts::double precision ASC
                         LIMIT %s
                         """,
-                        (workspace_id, channel_id, ts, after),
+                        tuple(params),
                     ).fetchall()
             else:
                 if before > 0:
+                    oldest_clause = "AND CAST(ts AS REAL) >= CAST(? AS REAL)" if oldest_ts else ""
+                    latest_clause = "AND CAST(ts AS REAL) < CAST(? AS REAL)" if latest_ts else ""
+                    params = [workspace_id, channel_id, ts]
+                    if oldest_ts:
+                        params.append(oldest_ts)
+                    if latest_ts:
+                        params.append(latest_ts)
+                    params.append(before)
                     older = conn.execute(
-                        """
+                        f"""
                         SELECT * FROM messages
                         WHERE workspace_id = ?
                           AND channel_id = ?
                           AND is_deleted = 0
                           AND (thread_ts IS NULL OR thread_ts = ts)
                           AND CAST(ts AS REAL) < CAST(? AS REAL)
+                          {oldest_clause}
+                          {latest_clause}
                         ORDER BY CAST(ts AS REAL) DESC
                         LIMIT ?
                         """,
-                        (workspace_id, channel_id, ts, before),
+                        tuple(params),
                     ).fetchall()
                 if after > 0:
+                    oldest_clause = "AND CAST(ts AS REAL) >= CAST(? AS REAL)" if oldest_ts else ""
+                    latest_clause = "AND CAST(ts AS REAL) < CAST(? AS REAL)" if latest_ts else ""
+                    params = [workspace_id, channel_id, ts]
+                    if oldest_ts:
+                        params.append(oldest_ts)
+                    if latest_ts:
+                        params.append(latest_ts)
+                    params.append(after)
                     newer = conn.execute(
-                        """
+                        f"""
                         SELECT * FROM messages
                         WHERE workspace_id = ?
                           AND channel_id = ?
                           AND is_deleted = 0
                           AND (thread_ts IS NULL OR thread_ts = ts)
                           AND CAST(ts AS REAL) > CAST(? AS REAL)
+                          {oldest_clause}
+                          {latest_clause}
                         ORDER BY CAST(ts AS REAL) ASC
                         LIMIT ?
                         """,
-                        (workspace_id, channel_id, ts, after),
+                        tuple(params),
                     ).fetchall()
 
         rows = list(reversed(older)) + list(newer)
