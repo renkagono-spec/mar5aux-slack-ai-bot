@@ -19,3 +19,7 @@ services:
         value: "true"
       - key: MAX_CONTEXT_MESSAGES
         value: "12"
+      - key: CONTEXT_NEIGHBOR_MESSAGES
+        value: "2"
+      - key: MAX_CONTEXT_CHARS
+        value: "26000"

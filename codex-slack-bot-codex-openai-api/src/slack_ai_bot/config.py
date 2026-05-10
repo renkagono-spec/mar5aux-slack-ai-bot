@@ -52,6 +52,8 @@ class Settings:
     search_scope: str
     max_search_rows: int
     max_context_messages: int
+    context_neighbor_messages: int
+    max_context_chars: int
     embed_on_ingest: bool
     allowed_answer_channel_ids: set[str]
     slack_own_bot_id: str | None
@@ -90,6 +92,8 @@ def get_settings() -> Settings:
         search_scope=search_scope,
         max_search_rows=env_int("MAX_SEARCH_ROWS", 5000),
         max_context_messages=env_int("MAX_CONTEXT_MESSAGES", 12),
+        context_neighbor_messages=env_int("CONTEXT_NEIGHBOR_MESSAGES", 2),
+        max_context_chars=env_int("MAX_CONTEXT_CHARS", 26000),
         embed_on_ingest=env_bool("EMBED_ON_INGEST", True),
         allowed_answer_channel_ids=env_set("ALLOWED_ANSWER_CHANNEL_IDS"),
         slack_own_bot_id=os.getenv("SLACK_OWN_BOT_ID") or None,

@@ -288,6 +288,113 @@ class Storage:
                     ).fetchall()
         return [self._row_to_message(row) for row in rows]
 
+    def list_thread_messages(
+        self,
+        workspace_id: str,
+        channel_id: str,
+        thread_ts: str,
+    ) -> list[StoredMessage]:
+        with self.connect() as conn:
+            if self.backend == "postgres":
+                rows = conn.execute(
+                    """
+                    SELECT * FROM messages
+                    WHERE workspace_id = %s
+                      AND channel_id = %s
+                      AND is_deleted = FALSE
+                      AND (ts = %s OR thread_ts = %s)
+                    ORDER BY ts::double precision ASC
+                    """,
+                    (workspace_id, channel_id, thread_ts, thread_ts),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM messages
+                    WHERE workspace_id = ?
+                      AND channel_id = ?
+                      AND is_deleted = 0
+                      AND (ts = ? OR thread_ts = ?)
+                    ORDER BY CAST(ts AS REAL) ASC
+                    """,
+                    (workspace_id, channel_id, thread_ts, thread_ts),
+                ).fetchall()
+        return [self._row_to_message(row) for row in rows]
+
+    def list_neighbor_messages(
+        self,
+        workspace_id: str,
+        channel_id: str,
+        ts: str,
+        before: int,
+        after: int,
+    ) -> list[StoredMessage]:
+        older: list[Any] = []
+        newer: list[Any] = []
+
+        with self.connect() as conn:
+            if self.backend == "postgres":
+                if before > 0:
+                    older = conn.execute(
+                        """
+                        SELECT * FROM messages
+                        WHERE workspace_id = %s
+                          AND channel_id = %s
+                          AND is_deleted = FALSE
+                          AND (thread_ts IS NULL OR thread_ts = ts)
+                          AND ts::double precision < %s::double precision
+                        ORDER BY ts::double precision DESC
+                        LIMIT %s
+                        """,
+                        (workspace_id, channel_id, ts, before),
+                    ).fetchall()
+                if after > 0:
+                    newer = conn.execute(
+                        """
+                        SELECT * FROM messages
+                        WHERE workspace_id = %s
+                          AND channel_id = %s
+                          AND is_deleted = FALSE
+                          AND (thread_ts IS NULL OR thread_ts = ts)
+                          AND ts::double precision > %s::double precision
+                        ORDER BY ts::double precision ASC
+                        LIMIT %s
+                        """,
+                        (workspace_id, channel_id, ts, after),
+                    ).fetchall()
+            else:
+                if before > 0:
+                    older = conn.execute(
+                        """
+                        SELECT * FROM messages
+                        WHERE workspace_id = ?
+                          AND channel_id = ?
+                          AND is_deleted = 0
+                          AND (thread_ts IS NULL OR thread_ts = ts)
+                          AND CAST(ts AS REAL) < CAST(? AS REAL)
+                        ORDER BY CAST(ts AS REAL) DESC
+                        LIMIT ?
+                        """,
+                        (workspace_id, channel_id, ts, before),
+                    ).fetchall()
+                if after > 0:
+                    newer = conn.execute(
+                        """
+                        SELECT * FROM messages
+                        WHERE workspace_id = ?
+                          AND channel_id = ?
+                          AND is_deleted = 0
+                          AND (thread_ts IS NULL OR thread_ts = ts)
+                          AND CAST(ts AS REAL) > CAST(? AS REAL)
+                        ORDER BY CAST(ts AS REAL) ASC
+                        LIMIT ?
+                        """,
+                        (workspace_id, channel_id, ts, after),
+                    ).fetchall()
+
+        rows = list(reversed(older)) + list(newer)
+        return [self._row_to_message(row) for row in rows]
+
     def _row_to_message(self, row: Any) -> StoredMessage:
         value = dict(row)
         embedding = None

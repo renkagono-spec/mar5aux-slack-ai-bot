@@ -25,7 +25,7 @@ def workspace_id_from_payload(payload: dict[str, Any], event: dict[str, Any]) ->
 
 def clean_question(text: str) -> str:
     cleaned = MENTION_RE.sub("", text or "").strip()
-    return cleaned or "このスレッド/チャンネルの関連情報を要約して"
+    return cleaned or "このスレッドまたはチャンネルの関連情報を要約して"
 
 
 def should_store_message(event: dict[str, Any], own_bot_id: str | None) -> bool:
@@ -85,7 +85,12 @@ def message_from_event(
             logging.exception("failed to create embedding")
 
     subtype = event.get("subtype")
-    source_type = "slack_file" if event.get("files") or subtype == "file_share" else "bot_message" if event.get("bot_id") else "slack_message"
+    if event.get("files") or subtype == "file_share":
+        source_type = "slack_file"
+    elif event.get("bot_id"):
+        source_type = "bot_message"
+    else:
+        source_type = "slack_message"
 
     return StoredMessage(
         workspace_id=workspace_id_from_payload(payload, event),
@@ -211,7 +216,7 @@ def handle_app_mention(
             )
             return
 
-        context = format_context(matches)
+        context = format_context(matches, max_chars=settings.max_context_chars)
         answer = openai_client.answer_question(question, context)
         slack_client.post_message(channel=channel_id, thread_ts=thread_ts, text=answer[:39000])
     except Exception:

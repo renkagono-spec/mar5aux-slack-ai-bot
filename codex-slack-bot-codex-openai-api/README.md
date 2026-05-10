@@ -9,6 +9,7 @@ Slack内の投稿を保存し、`@Company AI 質問` で関連メッセージを
 - メッセージ本文をOpenAI embeddingsで検索用に保存する
 - `@bot 今週ロゴ周りで何が決まった？` のような質問にSlackスレッドで返答する
 - 回答にSlack permalinkの根拠を含める
+- 検索ヒットの同一スレッドと前後の投稿もContextに含める
 - 既存ログを `scripts/backfill.py` で取り込む
 
 ## 質問する場所
