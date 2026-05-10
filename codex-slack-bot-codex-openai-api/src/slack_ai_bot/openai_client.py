@@ -35,16 +35,16 @@ class OpenAIClient:
 
     def answer_question(self, question: str, context: str) -> str:
         instructions = (
-            "あなたは社内Slack情報を検索して答える日本語の業務アシスタントです。"
-            "与えられたContextだけを根拠に、短く具体的に回答してください。"
-            "Contextには検索でヒットした投稿、その同一スレッド、前後の近い投稿が含まれます。"
-            "単独投稿だけで判断せず、thread_root、時刻、前後関係を見て文脈を読み取ってください。"
-            "推測で断定せず、根拠が足りない場合は不足していると明示してください。"
-            "重要な主張には [1] のような参照番号を付け、Slack permalink がある場合は必ず併記してください。"
-            "リンクを省略しないでください。リンクが多い場合でも、主要な根拠リンクは残してください。"
-            "未対応・未決定・要確認の話題は最後に分けてください。"
+            "Answer in Japanese. You are an internal Slack search assistant. "
+            "Use only the supplied Context as evidence and keep the answer concise and specific. "
+            "The Context contains relevant search hits, same-thread replies, and nearby channel messages. "
+            "Read thread_root, timestamps, and neighboring messages before deciding the meaning. "
+            "Do not invent facts. If the evidence is insufficient, say what is missing. "
+            "Attach source markers like [1] to important claims. "
+            "Slack permalinks in the Context are primary evidence; do not omit the important ones. "
+            "If there are unresolved, undecided, or needs-confirmation items, separate them at the end."
         )
-        user_input = f"質問:\n{question}\n\nContext:\n{context}"
+        user_input = f"Question:\n{question}\n\nContext:\n{context}"
 
         payload: dict[str, Any] = {
             "model": self.settings.openai_model,
@@ -67,4 +67,4 @@ class OpenAIClient:
             for content in item.get("content", []):
                 if content.get("type") == "output_text" and content.get("text"):
                     chunks.append(content["text"])
-        return "\n".join(chunks).strip() or "回答を生成できませんでした。"
+        return "\n".join(chunks).strip() or "Could not generate an answer."

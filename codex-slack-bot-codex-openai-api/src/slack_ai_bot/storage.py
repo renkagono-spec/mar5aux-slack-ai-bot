@@ -89,6 +89,12 @@ class Storage:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_messages_channel_updated ON messages(workspace_id, channel_id, updated_at DESC)"
                 )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_thread_ts ON messages(workspace_id, channel_id, thread_ts, ts)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_channel_ts ON messages(workspace_id, channel_id, ts)"
+                )
             else:
                 conn.execute(
                     """
@@ -126,6 +132,12 @@ class Storage:
                 )
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_messages_channel_updated ON messages(workspace_id, channel_id, updated_at DESC)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_thread_ts ON messages(workspace_id, channel_id, thread_ts, ts)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_channel_ts ON messages(workspace_id, channel_id, ts)"
                 )
 
     def record_event(self, event_id: str) -> bool:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import re
 
@@ -21,7 +22,7 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
 
 def keyword_tokens(text: str) -> set[str]:
     lowered = text.lower()
-    split_pattern = r"[\s、。,.!?！？:：/()\[\]{}<>「」『』]+"
+    split_pattern = "[\\s\\u3001\\u3002,.!?\\uff01\\uff1f:\\uff1a/()\\[\\]{}<>\\u300c\\u300d\\u300e\\u300f]+"
     return {token for token in re.split(split_pattern, lowered) if len(token) >= 2}
 
 
@@ -104,7 +105,12 @@ def search_messages(
         limit=settings.max_search_rows,
     )
 
-    query_embedding = openai_client.create_embedding(question)
+    query_embedding: list[float] | None = None
+    try:
+        query_embedding = openai_client.create_embedding(question)
+    except Exception:
+        logging.exception("failed to create search embedding")
+
     scored: list[tuple[float, StoredMessage]] = []
 
     if query_embedding:

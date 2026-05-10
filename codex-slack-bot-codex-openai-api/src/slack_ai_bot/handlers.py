@@ -12,6 +12,7 @@ from .storage import Storage, StoredMessage
 
 
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
+REFERENCE_LINKS_LABEL = "\u53c2\u7167\u30ea\u30f3\u30af"
 
 
 def workspace_id_from_payload(payload: dict[str, Any], event: dict[str, Any]) -> str:
@@ -25,7 +26,7 @@ def workspace_id_from_payload(payload: dict[str, Any], event: dict[str, Any]) ->
 
 def clean_question(text: str) -> str:
     cleaned = MENTION_RE.sub("", text or "").strip()
-    return cleaned or "このスレッドまたはチャンネルの関連情報を要約して"
+    return cleaned or "Summarize the relevant information in this thread or channel."
 
 
 def should_store_message(event: dict[str, Any], own_bot_id: str | None) -> bool:
@@ -153,7 +154,7 @@ def format_evidence_links(messages: list[StoredMessage], max_links: int = 8) -> 
 
     if not lines:
         return ""
-    return "\n\n参照リンク:\n" + "\n".join(lines)
+    return f"\n\n{REFERENCE_LINKS_LABEL}:\n" + "\n".join(lines)
 
 
 def handle_message_event(
@@ -208,7 +209,7 @@ def handle_app_mention(
         slack_client.post_message(
             channel=channel_id,
             thread_ts=thread_ts,
-            text="このbotは指定されたチャンネルでだけ回答する設定です。管理者に確認してください。",
+            text="This bot is configured to answer only in approved channels. Please ask the admin to add this channel.",
         )
         return
 
@@ -230,7 +231,7 @@ def handle_app_mention(
             slack_client.post_message(
                 channel=channel_id,
                 thread_ts=thread_ts,
-                text="まだ関連するSlack情報が見つかりませんでした。botを対象チャンネルに招待して、少しデータが溜まってからもう一度聞いてください。",
+                text="No relevant Slack information was found yet. Invite the bot to target channels and backfill history first.",
             )
             return
 
@@ -243,5 +244,5 @@ def handle_app_mention(
         slack_client.post_message(
             channel=channel_id,
             thread_ts=thread_ts,
-            text="回答中にエラーが出ました。サーバーログとAPIキー設定を確認してください。",
+            text="An error occurred while answering. Please check the server logs and API key settings.",
         )

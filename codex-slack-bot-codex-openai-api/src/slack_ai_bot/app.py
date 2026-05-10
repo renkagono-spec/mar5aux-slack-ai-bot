@@ -65,6 +65,7 @@ def create_app() -> FastAPI:
             "ok": True,
             "storage": storage.backend,
             "search_scope": settings.search_scope,
+            "features": ["thread_replies", "neighbor_context", "forced_evidence_links"],
             "missing": settings.missing_required_values,
         }
 
