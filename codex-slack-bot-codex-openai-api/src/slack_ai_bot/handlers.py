@@ -102,6 +102,37 @@ def message_from_event(
     )
 
 
+def store_thread_replies(
+    payload: dict[str, Any],
+    event: dict[str, Any],
+    storage: Storage,
+    slack_client: SlackClient,
+    openai_client: OpenAIClient,
+    settings: Settings,
+) -> int:
+    channel_id = event.get("channel") or event.get("message", {}).get("channel")
+    parent = event.get("message") if event.get("subtype") == "message_replied" else event
+    parent_ts = parent.get("thread_ts") or parent.get("ts")
+    if not channel_id or not parent_ts:
+        return 0
+
+    cursor = None
+    stored = 0
+    while True:
+        response = slack_client.conversation_replies(channel=channel_id, ts=parent_ts, cursor=cursor)
+        for reply_event in response.get("messages") or []:
+            reply_event.setdefault("channel", channel_id)
+            message = message_from_event(payload, reply_event, slack_client, openai_client, settings)
+            if message:
+                storage.upsert_message(message, raw=reply_event)
+                stored += 1
+
+        cursor = response.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            break
+    return stored
+
+
 def handle_message_event(
     payload: dict[str, Any],
     storage: Storage,
@@ -118,6 +149,13 @@ def handle_message_event(
         ts = previous.get("ts") or event.get("deleted_ts")
         if ts and event.get("channel"):
             storage.mark_deleted(workspace_id, event["channel"], ts)
+        return
+
+    if subtype == "message_replied":
+        try:
+            store_thread_replies(payload, event, storage, slack_client, openai_client, settings)
+        except Exception:
+            logging.exception("failed to store thread replies")
         return
 
     if subtype == "message_changed":

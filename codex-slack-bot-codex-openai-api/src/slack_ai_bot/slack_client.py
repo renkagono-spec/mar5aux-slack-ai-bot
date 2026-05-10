@@ -107,3 +107,19 @@ class SlackClient:
         if oldest:
             payload["oldest"] = oldest
         return self.api_post("conversations.history", payload)
+
+    def conversation_replies(
+        self,
+        channel: str,
+        ts: str,
+        limit: int = 200,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "channel": channel,
+            "ts": ts,
+            "limit": min(limit, 200),
+        }
+        if cursor:
+            params["cursor"] = cursor
+        return self.api_get("conversations.replies", params)
