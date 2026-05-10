@@ -41,7 +41,8 @@ class OpenAIClient:
             "Read thread_root, timestamps, and neighboring messages before deciding the meaning. "
             "Do not invent facts. If the evidence is insufficient, say what is missing. "
             "Attach source markers like [1] to important claims. "
-            "Slack permalinks in the Context are primary evidence; do not omit the important ones. "
+            "Do not paste Slack URLs in the answer body; use only source markers such as [1]. "
+            "The server will append links only for the source markers you actually used. "
             "If there are unresolved, undecided, or needs-confirmation items, separate them at the end."
         )
         user_input = f"Question:\n{question}\n\nContext:\n{context}"

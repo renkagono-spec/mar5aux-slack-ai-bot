@@ -40,7 +40,12 @@ class SlackClient:
         return response
 
     def post_message(self, channel: str, text: str, thread_ts: str | None = None) -> dict[str, Any]:
-        payload: dict[str, Any] = {"channel": channel, "text": text}
+        payload: dict[str, Any] = {
+            "channel": channel,
+            "text": text,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
         if thread_ts:
             payload["thread_ts"] = thread_ts
         return self.api_post("chat.postMessage", payload)

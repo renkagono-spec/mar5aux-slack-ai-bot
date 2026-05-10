@@ -12,6 +12,7 @@ from .storage import Storage, StoredMessage
 
 
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
+CITATION_RE = re.compile(r"\[(\d{1,3})\]")
 REFERENCE_LINKS_LABEL = "\u53c2\u7167\u30ea\u30f3\u30af"
 
 
@@ -139,16 +140,30 @@ def store_thread_replies(
     return stored
 
 
-def format_evidence_links(messages: list[StoredMessage], max_links: int = 8) -> str:
+def cited_message_indexes(answer: str, message_count: int) -> list[int]:
+    indexes: list[int] = []
+    seen: set[int] = set()
+    for match in CITATION_RE.finditer(answer):
+        index = int(match.group(1))
+        if index < 1 or index > message_count or index in seen:
+            continue
+        seen.add(index)
+        indexes.append(index)
+    return indexes
+
+
+def format_evidence_links(answer: str, messages: list[StoredMessage], max_links: int = 4) -> str:
     lines: list[str] = []
     seen: set[str] = set()
 
-    for message in messages:
+    for index in cited_message_indexes(answer, len(messages)):
+        message = messages[index - 1]
         if not message.permalink or message.permalink in seen:
             continue
         seen.add(message.permalink)
         channel = f"#{message.channel_name}" if message.channel_name else message.channel_id
-        lines.append(f"{len(lines) + 1}. {channel} {message.ts}\n{message.permalink}")
+        label = f"{channel} {message.ts}"
+        lines.append(f"{len(lines) + 1}. <{message.permalink}|{label}>")
         if len(lines) >= max_links:
             break
 
@@ -237,7 +252,7 @@ def handle_app_mention(
 
         context = format_context(matches, max_chars=settings.max_context_chars)
         answer = openai_client.answer_question(question, context)
-        answer_with_links = answer.rstrip() + format_evidence_links(matches)
+        answer_with_links = answer.rstrip() + format_evidence_links(answer, matches)
         slack_client.post_message(channel=channel_id, thread_ts=thread_ts, text=answer_with_links[:39000])
     except Exception:
         logging.exception("failed to answer app mention")
