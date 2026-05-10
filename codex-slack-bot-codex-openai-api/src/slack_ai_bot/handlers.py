@@ -138,6 +138,24 @@ def store_thread_replies(
     return stored
 
 
+def format_evidence_links(messages: list[StoredMessage], max_links: int = 8) -> str:
+    lines: list[str] = []
+    seen: set[str] = set()
+
+    for message in messages:
+        if not message.permalink or message.permalink in seen:
+            continue
+        seen.add(message.permalink)
+        channel = f"#{message.channel_name}" if message.channel_name else message.channel_id
+        lines.append(f"{len(lines) + 1}. {channel} {message.ts}\n{message.permalink}")
+        if len(lines) >= max_links:
+            break
+
+    if not lines:
+        return ""
+    return "\n\n参照リンク:\n" + "\n".join(lines)
+
+
 def handle_message_event(
     payload: dict[str, Any],
     storage: Storage,
@@ -218,7 +236,8 @@ def handle_app_mention(
 
         context = format_context(matches, max_chars=settings.max_context_chars)
         answer = openai_client.answer_question(question, context)
-        slack_client.post_message(channel=channel_id, thread_ts=thread_ts, text=answer[:39000])
+        answer_with_links = answer.rstrip() + format_evidence_links(matches)
+        slack_client.post_message(channel=channel_id, thread_ts=thread_ts, text=answer_with_links[:39000])
     except Exception:
         logging.exception("failed to answer app mention")
         slack_client.post_message(
