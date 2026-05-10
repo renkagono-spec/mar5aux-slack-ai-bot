@@ -6,7 +6,7 @@ from typing import Any
 
 from .config import Settings
 from .openai_client import OpenAIClient
-from .search import format_context, search_messages
+from .search import format_context, search_messages, today_jst
 from .slack_client import SlackClient
 from .storage import Storage, StoredMessage
 
@@ -23,6 +23,24 @@ FOLLOWUP_ONLY_HINTS = (
     "\u3084\u3063\u3066",
     "\u305d\u308c\u3067",
     "\u305d\u308c\u304a\u9858\u3044",
+)
+EXPLICIT_THREAD_REQUEST_HINTS = (
+    "\u3053\u306e\u30b9\u30ec\u30c3\u30c9",
+    "\u30b9\u30ec\u30c3\u30c9",
+)
+CONTEXTUAL_FOLLOWUP_HINTS = (
+    "\u305d\u3053\u3067",
+    "\u305d\u3053",
+    "\u305d\u306e",
+    "\u305d\u308c",
+    "\u3053\u306e\u4ef6",
+    "\u3053\u306e\u5185\u5bb9",
+    "\u3055\u3063\u304d",
+    "\u3055\u304d\u307b\u3069",
+    "\u4e0a\u306e",
+    "\u4e0a\u8a18",
+    "\u524d\u306e",
+    "\u3058\u3083\u3042",
 )
 SUBSTANTIVE_REQUEST_HINTS = (
     "?",
@@ -75,6 +93,18 @@ def is_followup_only_question(question: str) -> bool:
     return len(compact) <= 24 and any(hint in compact for hint in FOLLOWUP_ONLY_HINTS)
 
 
+def is_explicit_thread_request(question: str) -> bool:
+    cleaned = clean_question(question).lower()
+    return any(hint in cleaned for hint in EXPLICIT_THREAD_REQUEST_HINTS)
+
+
+def is_contextual_followup_question(question: str) -> bool:
+    if is_explicit_thread_request(question):
+        return False
+    cleaned = clean_question(question).lower()
+    return any(hint in cleaned for hint in CONTEXTUAL_FOLLOWUP_HINTS)
+
+
 def is_substantive_user_request(text: str) -> bool:
     cleaned = clean_question(text)
     if is_followup_only_question(cleaned):
@@ -97,20 +127,121 @@ def latest_previous_user_request(messages: list[StoredMessage], current_ts: str 
     return None
 
 
+def latest_previous_bot_answer(messages: list[StoredMessage], current_ts: str | None) -> str | None:
+    current = ts_as_float(current_ts)
+    for message in sorted(messages, key=lambda item: ts_as_float(item.ts), reverse=True):
+        if current and ts_as_float(message.ts) >= current:
+            continue
+        if message.source_type != "bot_message":
+            continue
+        cleaned = message.text.strip()
+        if cleaned:
+            return cleaned[:3000]
+    return None
+
+
 def resolve_effective_question(
     question: str,
     current_thread_messages: list[StoredMessage],
     current_ts: str | None,
 ) -> tuple[str, bool]:
-    if not current_thread_messages or not is_followup_only_question(question):
+    if not current_thread_messages:
         return question, False
+
     previous_question = latest_previous_user_request(current_thread_messages, current_ts)
+    previous_answer = latest_previous_bot_answer(current_thread_messages, current_ts)
+
+    if is_contextual_followup_question(question) and (previous_question or previous_answer):
+        return (
+            "Previous user request in this Slack thread:\n"
+            f"{previous_question or '(none)'}\n\n"
+            "Previous assistant answer in this Slack thread:\n"
+            f"{previous_answer or '(none)'}\n\n"
+            "Current follow-up question:\n"
+            f"{question}\n\n"
+            "Resolve words like 'there', 'that', 'sore', or 'soko' from the previous thread context, "
+            "then search the actual Slack source messages and answer the current follow-up directly.",
+            True,
+        )
+
+    if not is_followup_only_question(question):
+        return question, False
     if not previous_question:
         return question, False
     return previous_question, True
 
 
-def should_store_message(event: dict[str, Any], own_bot_id: str | None) -> bool:
+def should_resolve_with_ai(question: str, current_thread_messages: list[StoredMessage]) -> bool:
+    return bool(
+        current_thread_messages
+        and (
+            is_followup_only_question(question)
+            or is_contextual_followup_question(question)
+        )
+    )
+
+
+def format_thread_context_for_resolution(
+    messages: list[StoredMessage],
+    current_ts: str | None,
+    max_messages: int = 12,
+    max_chars: int = 9000,
+) -> str:
+    previous_messages = [
+        message
+        for message in sorted(messages, key=lambda item: ts_as_float(item.ts))
+        if ts_as_float(message.ts) < ts_as_float(current_ts)
+    ][-max_messages:]
+
+    lines: list[str] = []
+    total = 0
+    for message in previous_messages:
+        speaker = "assistant" if message.source_type == "bot_message" else (message.user_name or message.user_id or "unknown")
+        body = message.text.strip()
+        entry = f"{message.ts} {speaker}:\n{body}"
+        if total + len(entry) > max_chars:
+            break
+        lines.append(entry)
+        total += len(entry)
+
+    return "\n\n".join(lines)
+
+
+def resolve_question_with_ai(
+    question: str,
+    current_thread_messages: list[StoredMessage],
+    current_ts: str | None,
+    openai_client: OpenAIClient,
+) -> tuple[str, bool]:
+    if not should_resolve_with_ai(question, current_thread_messages):
+        return resolve_effective_question(question, current_thread_messages, current_ts)
+
+    thread_context = format_thread_context_for_resolution(current_thread_messages, current_ts)
+    if not thread_context:
+        return resolve_effective_question(question, current_thread_messages, current_ts)
+
+    try:
+        resolution = openai_client.resolve_followup_question(question, thread_context, today_jst())
+    except Exception:
+        logging.exception("failed to resolve follow-up question with AI")
+        return resolve_effective_question(question, current_thread_messages, current_ts)
+
+    standalone = str(resolution.get("standalone_question") or question).strip()
+    uses_thread_context = bool(resolution.get("uses_thread_context"))
+    if uses_thread_context and standalone:
+        return standalone, True
+    return resolve_effective_question(question, current_thread_messages, current_ts)
+
+
+def answer_question_text_for_thread_memory(question: str) -> str:
+    return (
+        f"{question}\n\n"
+        "The source search returned no direct hits. Use the supplied Slack thread memory only when it directly answers the question. "
+        "If it only contains the user's request and not the needed facts, say the source content was not found."
+    )
+
+
+def should_store_message(event: dict[str, Any], own_bot_id: str | None, include_own_bot: bool = False) -> bool:
     subtype = event.get("subtype")
     if subtype in {
         "channel_join",
@@ -123,7 +254,7 @@ def should_store_message(event: dict[str, Any], own_bot_id: str | None) -> bool:
         "message_changed",
     }:
         return False
-    if own_bot_id and event.get("bot_id") == own_bot_id:
+    if own_bot_id and event.get("bot_id") == own_bot_id and not include_own_bot:
         return False
     return bool((event.get("text") or "").strip() or event.get("files"))
 
@@ -148,9 +279,11 @@ def message_from_event(
     slack_client: SlackClient,
     openai_client: OpenAIClient,
     settings: Settings,
+    include_own_bot: bool = False,
+    embed: bool = True,
 ) -> StoredMessage | None:
     own_bot_id = slack_client.own_bot_id()
-    if not should_store_message(event, own_bot_id):
+    if not should_store_message(event, own_bot_id, include_own_bot=include_own_bot):
         return None
 
     text = event_text(event)
@@ -160,7 +293,7 @@ def message_from_event(
     channel_id = event["channel"]
     ts = event["ts"]
     embedding = None
-    if settings.embed_on_ingest:
+    if settings.embed_on_ingest and embed:
         try:
             embedding = openai_client.create_embedding(text)
         except Exception:
@@ -187,6 +320,41 @@ def message_from_event(
         source_type=source_type,
         embedding=embedding,
     )
+
+
+def live_thread_messages_by_ts(
+    payload: dict[str, Any],
+    channel_id: str,
+    thread_ts: str,
+    slack_client: SlackClient,
+    openai_client: OpenAIClient,
+    settings: Settings,
+) -> list[StoredMessage]:
+    if not channel_id or not thread_ts:
+        return []
+
+    cursor = None
+    messages: list[StoredMessage] = []
+    while True:
+        response = slack_client.conversation_replies(channel=channel_id, ts=thread_ts, cursor=cursor)
+        for reply_event in response.get("messages") or []:
+            reply_event.setdefault("channel", channel_id)
+            message = message_from_event(
+                payload,
+                reply_event,
+                slack_client,
+                openai_client,
+                settings,
+                include_own_bot=True,
+                embed=False,
+            )
+            if message:
+                messages.append(message)
+
+        cursor = response.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            break
+    return messages
 
 
 def store_thread_replies(
@@ -375,16 +543,28 @@ def handle_app_mention(
                 openai_client,
                 settings,
             )
-            current_thread_messages = storage.list_thread_messages(
-                workspace_id=workspace_id,
-                channel_id=channel_id,
-                thread_ts=event["thread_ts"],
-            )
+            try:
+                current_thread_messages = live_thread_messages_by_ts(
+                    payload,
+                    channel_id,
+                    event["thread_ts"],
+                    slack_client,
+                    openai_client,
+                    settings,
+                )
+            except Exception:
+                logging.exception("failed to fetch live thread memory")
+                current_thread_messages = storage.list_thread_messages(
+                    workspace_id=workspace_id,
+                    channel_id=channel_id,
+                    thread_ts=event["thread_ts"],
+                )
 
-        effective_question, inherited_question = resolve_effective_question(
+        effective_question, inherited_question = resolve_question_with_ai(
             question,
             current_thread_messages,
             event.get("ts"),
+            openai_client,
         )
         excluded_mention_ids = {mention_id for mention_id in [slack_client.own_user_id()] if mention_id}
 
@@ -399,6 +579,22 @@ def handle_app_mention(
             current_ts=event.get("ts") if not inherited_question else None,
             excluded_mention_ids=excluded_mention_ids,
         )
+
+        if not matches and inherited_question and current_thread_messages:
+            thread_memory = [
+                message
+                for message in current_thread_messages
+                if ts_as_float(message.ts) < ts_as_float(event.get("ts"))
+            ]
+            thread_context_messages = thread_memory[-settings.max_context_messages :]
+            context = format_context(thread_context_messages, max_chars=settings.max_context_chars)
+            answer = openai_client.answer_question(
+                answer_question_text_for_thread_memory(effective_question),
+                context,
+            )
+            answer_with_links = answer.rstrip() + format_evidence_links(answer, thread_context_messages)
+            slack_client.post_message(channel=channel_id, thread_ts=thread_ts, text=answer_with_links[:39000])
+            return
 
         if not matches:
             slack_client.post_message(

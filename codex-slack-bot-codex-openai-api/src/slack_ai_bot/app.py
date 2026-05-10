@@ -81,6 +81,7 @@ def create_app() -> FastAPI:
                 "live_thread_refresh",
                 "followup_question_resolution",
                 "bot_request_exclusion",
+                "ai_followup_rewrite",
             ],
             "missing": settings.missing_required_values,
         }

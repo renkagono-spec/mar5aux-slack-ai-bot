@@ -96,6 +96,71 @@ class OpenAIClient:
             "channel_names": [],
         }
 
+    def resolve_followup_question(self, question: str, thread_context: str, today_jst: str) -> dict[str, Any]:
+        instructions = (
+            "You rewrite a Slack follow-up question into a standalone Slack search question. "
+            "Return only compact JSON. "
+            "Use the supplied Slack thread context to resolve vague words such as 'soko', 'sore', 'that', 'there', "
+            "'the meeting mentioned there', 'above', or short replies like 'please do it'. "
+            "If the user asks when/where/who/what about something mentioned in the previous assistant answer, "
+            "include the specific topic, date, person names, and meeting name from the thread context. "
+            "Preserve important entities from the previous user request and previous assistant answer, such as dates, people, "
+            "channel names, project names, and topic words. For example, if the thread context mentions 4/27, Naito, "
+            "back-office expansion, and a meeting, the standalone question must include those details. "
+            "Do not answer the question. Do not invent facts that are not in the thread context. "
+            "JSON schema: {"
+            "\"uses_thread_context\": true|false, "
+            "\"standalone_question\": string, "
+            "\"reason\": string"
+            "}. "
+            "If the question is already standalone, return it unchanged with uses_thread_context=false."
+        )
+        response = post_json(
+            "https://api.openai.com/v1/responses",
+            {
+                "model": self.settings.openai_model,
+                "instructions": instructions,
+                "input": (
+                    f"today_jst={today_jst}\n\n"
+                    f"Current Slack question:\n{question}\n\n"
+                    f"Thread context before the current question:\n{thread_context[:9000]}"
+                ),
+            },
+            headers=self.headers,
+            timeout=60,
+        )
+
+        text = response.get("output_text") or ""
+        if not text:
+            chunks: list[str] = []
+            for item in response.get("output", []):
+                for content in item.get("content", []):
+                    if content.get("type") == "output_text" and content.get("text"):
+                        chunks.append(content["text"])
+            text = "\n".join(chunks)
+
+        try:
+            first = text.find("{")
+            last = text.rfind("}")
+            if first >= 0 and last >= first:
+                text = text[first : last + 1]
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                standalone = str(parsed.get("standalone_question") or question).strip()
+                return {
+                    "uses_thread_context": bool(parsed.get("uses_thread_context")),
+                    "standalone_question": standalone or question,
+                    "reason": str(parsed.get("reason") or ""),
+                }
+        except json.JSONDecodeError:
+            logging.exception("failed to parse follow-up resolution")
+
+        return {
+            "uses_thread_context": False,
+            "standalone_question": question,
+            "reason": "resolver_fallback",
+        }
+
     def answer_question(self, question: str, context: str) -> str:
         instructions = (
             "Answer in Japanese. You are an internal Slack search assistant. "

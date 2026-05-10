@@ -126,6 +126,25 @@ class SlackClient:
             payload["oldest"] = oldest
         return self.api_post("conversations.history", payload)
 
+    def conversation_list(
+        self,
+        types: str = "public_channel",
+        limit: int = 200,
+        cursor: str | None = None,
+        exclude_archived: bool = True,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "types": types,
+            "limit": min(limit, 1000),
+            "exclude_archived": "true" if exclude_archived else "false",
+        }
+        if cursor:
+            params["cursor"] = cursor
+        return self.api_get("conversations.list", params)
+
+    def conversation_join(self, channel: str) -> dict[str, Any]:
+        return self.api_post("conversations.join", {"channel": channel})
+
     def conversation_replies(
         self,
         channel: str,
