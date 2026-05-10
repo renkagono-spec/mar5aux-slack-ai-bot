@@ -61,9 +61,16 @@ def create_app() -> FastAPI:
 
     @api.get("/healthz")
     def healthz() -> dict[str, Any]:
+        try:
+            storage.health_check()
+        except Exception as exc:
+            logging.exception("database health check failed")
+            raise HTTPException(status_code=503, detail="database unavailable") from exc
+
         return {
             "ok": True,
             "storage": storage.backend,
+            "db": "ok",
             "search_scope": settings.search_scope,
             "features": ["thread_replies", "neighbor_context", "forced_evidence_links"],
             "missing": settings.missing_required_values,

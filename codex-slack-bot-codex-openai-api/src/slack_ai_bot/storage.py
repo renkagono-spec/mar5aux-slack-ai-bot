@@ -140,6 +140,10 @@ class Storage:
                     "CREATE INDEX IF NOT EXISTS idx_messages_channel_ts ON messages(workspace_id, channel_id, ts)"
                 )
 
+    def health_check(self) -> None:
+        with self.connect() as conn:
+            conn.execute("SELECT 1").fetchone()
+
     def record_event(self, event_id: str) -> bool:
         if not event_id:
             return True
