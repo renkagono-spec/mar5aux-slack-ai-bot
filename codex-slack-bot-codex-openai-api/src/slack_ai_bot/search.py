@@ -13,6 +13,24 @@ from .openai_client import OpenAIClient
 from .storage import Storage, StoredMessage
 
 JST = ZoneInfo("Asia/Tokyo")
+THREAD_MEMORY_HINTS = (
+    "さっき",
+    "さきほど",
+    "さっきの",
+    "この件",
+    "この内容",
+    "上の",
+    "上記",
+    "それ",
+    "これ",
+    "今の",
+    "会議",
+    "要約",
+    "まとめ",
+    "決まった",
+    "タスク",
+    "未対応",
+)
 
 
 @dataclass(frozen=True)
@@ -74,6 +92,30 @@ def message_datetime_jst(message: StoredMessage) -> str:
 
 def thread_root_ts(message: StoredMessage) -> str:
     return message.thread_ts or message.ts
+
+
+def should_use_thread_memory(question: str, thread_ts: str | None, current_ts: str | None) -> bool:
+    if not thread_ts or thread_ts == current_ts:
+        return False
+    lowered = question.lower()
+    return any(hint in lowered for hint in THREAD_MEMORY_HINTS)
+
+
+def thread_memory_messages(
+    workspace_id: str,
+    channel_id: str,
+    thread_ts: str | None,
+    current_ts: str | None,
+    question: str,
+    storage: Storage,
+) -> list[StoredMessage]:
+    if not should_use_thread_memory(question, thread_ts, current_ts):
+        return []
+    return storage.list_thread_messages(
+        workspace_id=workspace_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+    )
 
 
 def today_jst() -> str:
@@ -187,7 +229,20 @@ def search_messages(
     settings: Settings,
     storage: Storage,
     openai_client: OpenAIClient,
+    thread_ts: str | None = None,
+    current_ts: str | None = None,
 ) -> list[StoredMessage]:
+    thread_memory = thread_memory_messages(
+        workspace_id=workspace_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        current_ts=current_ts,
+        question=question,
+        storage=storage,
+    )
+    if thread_memory:
+        return thread_memory
+
     plan = plan_search(question, openai_client)
     candidates = storage.list_messages(
         workspace_id=workspace_id,

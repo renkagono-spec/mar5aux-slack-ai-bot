@@ -240,6 +240,8 @@ def handle_app_mention(
             settings=settings,
             storage=storage,
             openai_client=openai_client,
+            thread_ts=event.get("thread_ts"),
+            current_ts=event.get("ts"),
         )
 
         if not matches:
