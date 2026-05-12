@@ -167,6 +167,7 @@ class OpenAIClient:
         instructions = (
             "Answer in Japanese. You are an internal Slack search assistant. "
             "Use only the supplied Context as evidence and keep the answer concise and specific. "
+            "Start with the direct answer first. For questions asking when, where, who, or what, put the extracted value in the first sentence. "
             "The Context contains relevant search hits, same-thread replies, and nearby channel messages. "
             "When the user's question says 'sakki', 'this', 'that', 'above', or asks for a meeting summary inside a Slack thread, "
             "treat the supplied same-thread messages as short-term memory for that thread. "
@@ -174,6 +175,8 @@ class OpenAIClient:
             "If a date-specific question includes later same-thread replies, distinguish the original day's discussion from later follow-ups. "
             "Never answer by describing the user's request itself. If the Context only contains bot requests or meta discussion, say that source content was not found. "
             "Do not invent facts. If the evidence is insufficient, say what is missing. "
+            "Prefer concrete timestamps, dates, channel names, people, and meeting locations over vague summaries. "
+            "If the answer depends on a later thread reply after the user's requested date, explain that timeline clearly. "
             "Attach source markers like [1] to important claims. "
             "Do not paste Slack URLs in the answer body; use only source markers such as [1]. "
             "The server will append links only for the source markers you actually used. "

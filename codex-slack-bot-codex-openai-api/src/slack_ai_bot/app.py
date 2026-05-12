@@ -85,6 +85,9 @@ def create_app() -> FastAPI:
                 "hybrid_search_ranking",
                 "slack_link_thread_lookup",
                 "joined_channel_bulk_backfill",
+                "term_prefilter_retrieval",
+                "coverage_report",
+                "direct_answer_prompting",
             ],
             "missing": settings.missing_required_values,
         }

@@ -308,6 +308,84 @@ class Storage:
                 ).fetchall()
         return [self._row_to_message(row) for row in rows]
 
+    def list_messages_matching_terms(
+        self,
+        workspace_id: str,
+        channel_id: str | None,
+        search_scope: str,
+        terms: list[str],
+        limit: int,
+        oldest_ts: str | None = None,
+        latest_ts: str | None = None,
+    ) -> list[StoredMessage]:
+        cleaned_terms = [term.strip().lower() for term in terms if len(term.strip()) >= 2]
+        if not cleaned_terms:
+            return []
+
+        channel_filter = search_scope == "channel" and channel_id
+        with self.connect() as conn:
+            if self.backend == "postgres":
+                conditions = ["workspace_id = %s", "is_deleted = FALSE"]
+                params: list[Any] = [workspace_id]
+                if channel_filter:
+                    conditions.append("channel_id = %s")
+                    params.append(channel_id)
+                if oldest_ts:
+                    conditions.append("ts::double precision >= %s::double precision")
+                    params.append(oldest_ts)
+                if latest_ts:
+                    conditions.append("ts::double precision < %s::double precision")
+                    params.append(latest_ts)
+
+                searchable = "LOWER(COALESCE(text, '') || ' ' || COALESCE(channel_name, '') || ' ' || COALESCE(user_name, ''))"
+                term_clauses = []
+                for term in cleaned_terms[:12]:
+                    term_clauses.append(f"{searchable} LIKE %s")
+                    params.append(f"%{term}%")
+                conditions.append("(" + " OR ".join(term_clauses) + ")")
+                params.append(limit)
+
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM messages
+                    WHERE {" AND ".join(conditions)}
+                    ORDER BY ts::double precision DESC
+                    LIMIT %s
+                    """,
+                    tuple(params),
+                ).fetchall()
+            else:
+                conditions = ["workspace_id = ?", "is_deleted = 0"]
+                params = [workspace_id]
+                if channel_filter:
+                    conditions.append("channel_id = ?")
+                    params.append(channel_id)
+                if oldest_ts:
+                    conditions.append("CAST(ts AS REAL) >= CAST(? AS REAL)")
+                    params.append(oldest_ts)
+                if latest_ts:
+                    conditions.append("CAST(ts AS REAL) < CAST(? AS REAL)")
+                    params.append(latest_ts)
+
+                searchable = "LOWER(COALESCE(text, '') || ' ' || COALESCE(channel_name, '') || ' ' || COALESCE(user_name, ''))"
+                term_clauses = []
+                for term in cleaned_terms[:12]:
+                    term_clauses.append(f"{searchable} LIKE ?")
+                    params.append(f"%{term}%")
+                conditions.append("(" + " OR ".join(term_clauses) + ")")
+                params.append(limit)
+
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM messages
+                    WHERE {" AND ".join(conditions)}
+                    ORDER BY CAST(ts AS REAL) DESC
+                    LIMIT ?
+                    """,
+                    tuple(params),
+                ).fetchall()
+        return [self._row_to_message(row) for row in rows]
+
     def list_thread_messages(
         self,
         workspace_id: str,
@@ -456,6 +534,58 @@ class Storage:
 
         rows = list(reversed(older)) + list(newer)
         return [self._row_to_message(row) for row in rows]
+
+    def channel_message_stats(self, workspace_id: str | None = None) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            if self.backend == "postgres":
+                conditions = ["is_deleted = FALSE"]
+                params: list[Any] = []
+                if workspace_id:
+                    conditions.append("workspace_id = %s")
+                    params.append(workspace_id)
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        workspace_id,
+                        channel_id,
+                        COALESCE(channel_name, channel_id) AS channel_name,
+                        COUNT(*) AS message_count,
+                        MIN(ts::double precision) AS oldest_ts,
+                        MAX(ts::double precision) AS latest_ts,
+                        COUNT(*) FILTER (WHERE thread_ts IS NOT NULL AND thread_ts <> ts) AS reply_count,
+                        COUNT(*) FILTER (WHERE embedding_json IS NULL) AS missing_embedding_count
+                    FROM messages
+                    WHERE {" AND ".join(conditions)}
+                    GROUP BY workspace_id, channel_id, channel_name
+                    ORDER BY message_count DESC
+                    """,
+                    tuple(params),
+                ).fetchall()
+            else:
+                conditions = ["is_deleted = 0"]
+                params = []
+                if workspace_id:
+                    conditions.append("workspace_id = ?")
+                    params.append(workspace_id)
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        workspace_id,
+                        channel_id,
+                        COALESCE(channel_name, channel_id) AS channel_name,
+                        COUNT(*) AS message_count,
+                        MIN(CAST(ts AS REAL)) AS oldest_ts,
+                        MAX(CAST(ts AS REAL)) AS latest_ts,
+                        SUM(CASE WHEN thread_ts IS NOT NULL AND thread_ts <> ts THEN 1 ELSE 0 END) AS reply_count,
+                        SUM(CASE WHEN embedding_json IS NULL THEN 1 ELSE 0 END) AS missing_embedding_count
+                    FROM messages
+                    WHERE {" AND ".join(conditions)}
+                    GROUP BY workspace_id, channel_id, channel_name
+                    ORDER BY message_count DESC
+                    """,
+                    tuple(params),
+                ).fetchall()
+        return [dict(row) for row in rows]
 
     def _row_to_message(self, row: Any) -> StoredMessage:
         value = dict(row)

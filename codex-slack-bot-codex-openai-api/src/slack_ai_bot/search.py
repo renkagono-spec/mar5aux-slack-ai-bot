@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
 import logging
 import math
 import re
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import Settings
 from .openai_client import OpenAIClient
 from .storage import Storage, StoredMessage
 
-JST = ZoneInfo("Asia/Tokyo")
+try:
+    JST = ZoneInfo("Asia/Tokyo")
+except ZoneInfoNotFoundError:
+    JST = timezone(timedelta(hours=9), name="JST")
 THREAD_MEMORY_HINTS = (
     "\u3053\u306e\u30b9\u30ec\u30c3\u30c9",
     "\u30b9\u30ec\u30c3\u30c9",
@@ -145,6 +148,37 @@ def build_search_query(question: str, plan: SearchPlan) -> str:
     if plan.start_date and plan.end_date:
         parts.append(f"date: {plan.start_date} to {plan.end_date}")
     return "\n".join(parts)
+
+
+def search_terms(question: str, plan: SearchPlan) -> list[str]:
+    terms: list[str] = []
+    terms.extend(plan.keywords)
+    terms.extend(plan.person_names)
+    terms.extend(plan.channel_names)
+    terms.extend(keyword_tokens(question))
+
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for term in terms:
+        value = term.strip().lower()
+        if len(value) < 2 or value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    return cleaned
+
+
+def merge_messages(groups: list[list[StoredMessage]]) -> list[StoredMessage]:
+    merged: list[StoredMessage] = []
+    seen: set[tuple[str, str, str]] = set()
+    for group in groups:
+        for message in group:
+            key = message_key(message)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(message)
+    return merged
 
 
 def string_contains_any(text: str | None, needles: list[str]) -> bool:
@@ -383,7 +417,7 @@ def search_messages(
         return exclude_mentioned_messages(thread_memory, excluded_mention_ids)
 
     plan = plan_search(question, openai_client)
-    candidates = storage.list_messages(
+    recent_candidates = storage.list_messages(
         workspace_id=workspace_id,
         channel_id=channel_id,
         search_scope=settings.search_scope,
@@ -391,6 +425,16 @@ def search_messages(
         oldest_ts=plan.oldest_ts if plan.date_intent else None,
         latest_ts=plan.latest_ts if plan.date_intent else None,
     )
+    term_candidates = storage.list_messages_matching_terms(
+        workspace_id=workspace_id,
+        channel_id=channel_id,
+        search_scope=settings.search_scope,
+        terms=search_terms(question, plan),
+        limit=settings.max_search_rows,
+        oldest_ts=plan.oldest_ts if plan.date_intent else None,
+        latest_ts=plan.latest_ts if plan.date_intent else None,
+    )
+    candidates = merge_messages([term_candidates, recent_candidates])
     candidates = exclude_mentioned_messages(candidates, excluded_mention_ids)
     if not candidates:
         return []
