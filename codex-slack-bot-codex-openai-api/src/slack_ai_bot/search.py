@@ -16,28 +16,24 @@ try:
     JST = ZoneInfo("Asia/Tokyo")
 except ZoneInfoNotFoundError:
     JST = timezone(timedelta(hours=9), name="JST")
+# Only EXPLICIT references to the current thread short-circuit search to return
+# thread-memory only. Generic topic/summary words (kaigi, youyaku, matome,
+# kuwashiku, task, ...) were removed: when present in a standalone question that
+# merely happens to be asked inside a thread (e.g. "tell me about B in detail"),
+# they used to hijack the whole search and return the unrelated thread instead.
+# Those generic cases are now handled by the AI follow-up resolver in handlers,
+# which decides per-question whether the thread context is actually relevant.
 THREAD_MEMORY_HINTS = (
-    "\u3053\u306e\u30b9\u30ec\u30c3\u30c9",
-    "\u30b9\u30ec\u30c3\u30c9",
-    "\u3055\u3063\u304d",  # sakki
-    "\u3055\u304d\u307b\u3069",
-    "\u3055\u3063\u304d\u306e",
-    "\u3053\u306e\u4ef6",
-    "\u3053\u306e\u5185\u5bb9",
-    "\u4e0a\u306e",
-    "\u4e0a\u8a18",
-    "\u305d\u308c",
-    "\u3053\u308c",
-    "\u4eca\u306e",
-    "\u4f1a\u8b70",
-    "\u8981\u7d04",
-    "\u307e\u3068\u3081",
-    "\u6c7a\u307e\u3063\u305f",
-    "\u30bf\u30b9\u30af",
-    "\u672a\u5bfe\u5fdc",
-    "\u8a73\u3057\u304f",
-    "\u51fa\u3057\u3066",
-    "\u3082\u3046\u4e00\u56de",
+    "\u3053\u306e\u30b9\u30ec\u30c3\u30c9",  # this thread
+    "\u30b9\u30ec\u30c3\u30c9",  # thread
+    "\u3055\u3063\u304d",  # sakki (earlier)
+    "\u3055\u304d\u307b\u3069",  # sakihodo
+    "\u3055\u3063\u304d\u306e",  # sakki no
+    "\u3053\u306e\u4ef6",  # this matter
+    "\u3053\u306e\u5185\u5bb9",  # this content
+    "\u4e0a\u306e",  # above
+    "\u4e0a\u8a18",  # the above
+    "\u4eca\u306e",  # the current/just now
 )
 SLACK_LINK_RE = re.compile(r"/archives/([A-Z0-9]+)/p(\d{10})(\d{6})")
 SLACK_THREAD_TS_RE = re.compile(r"[?&]thread_ts=(\d+\.\d+)")

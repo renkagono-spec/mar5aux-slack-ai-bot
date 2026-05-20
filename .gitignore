@@ -9,7 +9,7 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Local debug scratch
-scripts/diag_*.py
-scripts/list_joined.py
-scripts/test_openai.py
+# Local debug scratch (match anywhere in the tree, not just repo root)
+diag_*.py
+list_joined.py
+test_openai.py
