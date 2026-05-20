@@ -63,6 +63,7 @@ class OpenAIClient:
                 "model": self.settings.openai_model,
                 "instructions": instructions,
                 "input": f"today_jst={today_jst}\nquestion={question}",
+                "temperature": 0,
             },
             headers=self.headers,
             timeout=60,
@@ -102,14 +103,23 @@ class OpenAIClient:
         instructions = (
             "You rewrite a Slack follow-up question into a standalone Slack search question. "
             "Return only compact JSON. "
-            "Use the supplied Slack thread context to resolve vague words such as 'soko', 'sore', 'that', 'there', "
-            "'the meeting mentioned there', 'above', or short replies like 'please do it'. "
-            "If the user asks when/where/who/what about something mentioned in the previous assistant answer, "
-            "include the specific topic, date, person names, and meeting name from the thread context. "
-            "Preserve important entities from the previous user request and previous assistant answer, such as dates, people, "
-            "channel names, project names, and topic words. For example, if the thread context mentions 4/27, Naito, "
-            "back-office expansion, and a meeting, the standalone question must include those details. "
+            "FIRST decide whether the current question CONTINUES the thread's topic or INTRODUCES a new one. "
+            "A question CONTINUES the thread when it relies on the thread to be understood: it uses vague words "
+            "such as 'soko', 'sore', 'kore', 'that', 'there', 'above', 'sakki'; it is elliptical (e.g. 'and the amount?', "
+            "'is it written in email too?', 'please do it'); or it asks more about the same subject already discussed. "
+            "For these, set uses_thread_context=true and rewrite into a standalone question that carries over the specific "
+            "topic, dates, person names, project names, and channel names from the thread context. "
+            "A question INTRODUCES a new topic when it names a concrete new entity, product, person, project, or subject "
+            "that is NOT present in the thread context (for example asking about a different product or a different company). "
+            "For these, set uses_thread_context=false and return the question UNCHANGED. "
+            "Never attach the thread's channel name, topic, dates, or people to a question about an unrelated new subject. "
+            "When unsure whether the question is related, prefer uses_thread_context=false and keep the question unchanged. "
             "Do not answer the question. Do not invent facts that are not in the thread context. "
+            "Examples: "
+            "Thread is about 'Tanaka Seni invoice'. Question 'is it written in email too?' -> "
+            "uses_thread_context=true, standalone='Is the Tanaka Seni invoice also written about in any email?'. "
+            "Thread is about 'Tanaka Seni invoice'. Question 'tell me the status of the Baleno emblem' -> "
+            "uses_thread_context=false, standalone unchanged (Baleno emblem is a new unrelated subject; never merge it with the invoice topic). "
             "JSON schema: {"
             "\"uses_thread_context\": true|false, "
             "\"standalone_question\": string, "
@@ -127,6 +137,7 @@ class OpenAIClient:
                     f"Current Slack question:\n{question}\n\n"
                     f"Thread context before the current question:\n{thread_context[:9000]}"
                 ),
+                "temperature": 0,
             },
             headers=self.headers,
             timeout=60,

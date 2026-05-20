@@ -1,0 +1,15 @@
+# Secrets - never commit
+.env
+*.env
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Local debug scratch
+scripts/diag_*.py
+scripts/list_joined.py
+scripts/test_openai.py

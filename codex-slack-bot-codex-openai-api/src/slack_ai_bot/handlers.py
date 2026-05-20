@@ -172,13 +172,22 @@ def resolve_effective_question(
 
 
 def should_resolve_with_ai(question: str, current_thread_messages: list[StoredMessage]) -> bool:
-    return bool(
-        current_thread_messages
-        and (
-            is_followup_only_question(question)
-            or is_contextual_followup_question(question)
-        )
-    )
+    if not current_thread_messages:
+        return False
+    # Explicit "summarize this thread" requests should use the thread itself as
+    # context, not be rewritten into a standalone workspace search question.
+    if is_explicit_thread_request(question):
+        return False
+    # Keyword fast-paths for obvious follow-ups.
+    if is_followup_only_question(question) or is_contextual_followup_question(question):
+        return True
+    # General case: when mentioned inside a thread that already has prior
+    # conversation, defer to the AI resolver to judge whether the question
+    # depends on the thread. Keyword lists miss many natural follow-ups such as
+    # "is it written in email too?" that carry no explicit pronoun. The resolver
+    # returns uses_thread_context=false for genuinely new or unrelated questions,
+    # so this stays safe for standalone questions asked inside a thread.
+    return True
 
 
 def format_thread_context_for_resolution(
