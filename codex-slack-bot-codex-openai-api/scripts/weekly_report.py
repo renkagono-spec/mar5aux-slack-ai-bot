@@ -22,7 +22,9 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from datetime import datetime, timedelta
+import json
 from pathlib import Path
+import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,19 +102,129 @@ CHANNEL_INSTRUCTIONS = (
 )
 
 REPORT_INSTRUCTIONS = (
-    "You write a concise internal weekly Slack report in Japanese from per-channel summaries. "
-    "Output EXACTLY these three sections in this order, each as a Slack-formatted heading: "
-    "*【主な決定事項】*, *【未対応・要フォロー】*, *【新規の動き】*. "
-    "Under each, write short bullet points starting with '• '. "
-    "Put the source channel in parentheses at the end of each bullet, e.g. (#channel-name). "
-    "Merge duplicates across channels and keep only what matters. Be factual, do not invent. "
-    "If a section genuinely has nothing, write '• 特になし' under it. "
-    "Do not add any other sections or preamble."
+    "You write a concise internal weekly status report in Japanese from numbered Slack source messages. "
+    "Each source line is formatted as '[n] (#channel) date who: text'. "
+    "Do NOT list events chronologically. Instead, GROUP everything by deal / product / project / client "
+    "(an'ken). Examples of an'ken: KASHIRO渋谷ストア, ゴルフウェア(クロップ), 大判ワッペン, コーポレートサイト, "
+    "補助金, 入金/請求. Merge every related fact from all sources into the same an'ken. "
+    "Output one Slack heading: *【案件別ステータス】*. "
+    "Under it, one bullet per an'ken, starting with '• ' and the an'ken name in bold, like: "
+    "'• *KASHIRO渋谷ストア*: 現状を1〜2文で。→ 次にやること/待ち。 [12][34]' "
+    "Each bullet: first state the CURRENT STATE in one short sentence (what stage it is at now), "
+    "then if there is an open action or what it is waiting on, add it after a '→'. "
+    "IMPORTANT: end every bullet with the source numbers you used, in square brackets like [12][34] "
+    "(1 to 3 of the most relevant sources). Use only numbers that actually exist in the input. "
+    "Be concise: one bullet should be at most two short sentences. Prioritise active deals and the biggest "
+    "movements; aim for about 6 to 10 bullets total, not more. Merge duplicates, drop trivia and pure "
+    "notification noise (system mails, automated receipts) unless they change a deal's status. "
+    "Be factual, do not invent. Optionally append a short '*【入金・請求】*' heading with bullets only if there "
+    "are concrete payment / invoice items (also with source numbers). Do not add any other sections or preamble."
+)
+
+CITATION_RE = re.compile(r"\[(\d{1,3})\]")
+
+TRIAGE_INSTRUCTIONS = (
+    "You triage forwarded emails and automated Slack messages for an apparel company. "
+    "Each numbered item is one message. Return JSON only: a list of objects {\"n\": int, \"keep\": bool}. "
+    "keep=true ONLY when the message is a real, person-to-person business matter that a human must act on: "
+    "orders, quotes, invoices/payments, production or delivery scheduling, customer or partner replies, "
+    "meeting scheduling, or anything affecting a live deal. "
+    "keep=false for newsletters, ad/marketing mail, seminar or event invitations, cold sales pitches, "
+    "system notifications, receipts, automatic delivery/shipping notices, and spam. "
+    "When genuinely unsure, keep=true (do not drop a possibly-important business mail). Return only the JSON list."
 )
 
 
+def parse_json_object_list(raw: str) -> list:
+    """Parse a JSON list of objects, tolerating models that omit the [] wrapper.
+
+    The model sometimes returns ``{"n":1},{"n":2}`` (comma-separated objects with
+    no array brackets). Wrap those before parsing so triage decisions are not lost.
+    """
+    text = (raw or "").strip()
+    if "[" in text and "]" in text and text.find("[") < text.rfind("]"):
+        snippet = text[text.find("["): text.rfind("]") + 1]
+    elif "{" in text and "}" in text:
+        snippet = "[" + text[text.find("{"): text.rfind("}") + 1] + "]"
+    else:
+        return []
+    try:
+        data = json.loads(snippet)
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def classify_keep_important(settings, messages: list[StoredMessage], batch_size: int = 40) -> set[tuple[str, str]]:
+    """Return the set of (channel_id, ts) for bot/email messages worth keeping.
+
+    On any failure we fail open (treat the batch as keep) so the report never
+    silently loses real business mail because of a transient API issue.
+    """
+    keep: set[tuple[str, str]] = set()
+    for start in range(0, len(messages), batch_size):
+        batch = messages[start:start + batch_size]
+        lines = [f"[{i + 1}] {compact(m.text, 400)}" for i, m in enumerate(batch)]
+        try:
+            raw = openai_complete(settings, TRIAGE_INSTRUCTIONS, "\n\n".join(lines), timeout=120)
+            parsed = parse_json_object_list(raw)
+            if not parsed:
+                raise ValueError("empty triage result")
+            decided: dict[int, bool] = {}
+            for obj in parsed:
+                if not isinstance(obj, dict):
+                    continue
+                n = obj.get("n")
+                if isinstance(n, int) and 1 <= n <= len(batch):
+                    decided[n] = bool(obj.get("keep"))
+            for i, message in enumerate(batch, start=1):
+                if decided.get(i, True):  # default keep when the model omitted an item
+                    keep.add((message.channel_id, message.ts))
+        except Exception:  # noqa: BLE001 - fail open
+            for message in batch:
+                keep.add((message.channel_id, message.ts))
+    return keep
+
+
+def linkify_citations(report_text: str, index_to_message: dict[int, StoredMessage], max_links: int = 2) -> str:
+    """Replace trailing [n] markers on each line with compact Slack permalinks.
+
+    Each citation becomes a short numbered link like ``[1]`` that points to the
+    source message, with the channel name on hover, so the bullet text stays
+    readable instead of being buried under full URLs.
+    """
+    out_lines: list[str] = []
+    for line in report_text.split("\n"):
+        numbers = [int(value) for value in CITATION_RE.findall(line)]
+        if not numbers:
+            out_lines.append(line)
+            continue
+
+        cleaned = CITATION_RE.sub("", line).rstrip()
+        links: list[str] = []
+        seen: set[str] = set()
+        for position, number in enumerate(numbers, start=1):
+            message = index_to_message.get(number)
+            if not message or not message.permalink or message.permalink in seen:
+                continue
+            seen.add(message.permalink)
+            channel = f"#{message.channel_name}" if message.channel_name else message.channel_id
+            when = message_datetime_jst(message)[5:10]  # MM-DD
+            # tooltip text shows channel + date; visible label stays tiny.
+            links.append(f"<{message.permalink}|🔗{channel} {when}>")
+            if len(links) >= max_links:
+                break
+
+        if links:
+            out_lines.append(f"{cleaned}  " + " ".join(links))
+        else:
+            out_lines.append(cleaned)
+    return "\n".join(out_lines)
+
+
 def build_report(settings, days: int, min_channel_messages: int, max_messages_per_channel: int,
-                 own_user_id: str | None) -> tuple[str, dict]:
+                 own_user_id: str | None, max_total_sources: int = 260,
+                 exclude_mail_noise: bool = True) -> tuple[str, dict]:
     storage = Storage(settings)
     storage.init_schema()
 
@@ -147,45 +259,57 @@ def build_report(settings, days: int, min_channel_messages: int, max_messages_pe
     for message in messages:
         by_channel[message.channel_id].append(message)
 
-    channel_summaries: list[str] = []
-    minor_lines: list[str] = []
-    summarized = 0
-
-    # Larger channels first so the most active context leads the reduce input.
-    for channel_id, channel_messages in sorted(by_channel.items(), key=lambda kv: len(kv[1]), reverse=True):
+    # Cap each channel to its most recent N messages, then merge everything into
+    # one workspace-wide chronological stream. Capping per channel first stops a
+    # single high-volume mail channel from crowding out the human-conversation
+    # channels; the chronological merge keeps related context near each other and
+    # spreads source numbers across all channels so citations are not lopsided.
+    capped: list[StoredMessage] = []
+    for channel_messages in by_channel.values():
         channel_messages.sort(key=lambda m: float(m.ts) if m.ts.replace(".", "").isdigit() else 0.0)
-        name = channel_messages[0].channel_name or channel_id
+        capped.extend(channel_messages[-max_messages_per_channel:])
+    capped.sort(key=lambda m: float(m.ts) if m.ts.replace(".", "").isdigit() else 0.0)
 
-        if len(channel_messages) >= min_channel_messages:
-            capped = channel_messages[-max_messages_per_channel:]
-            transcript = "\n".join(transcript_lines(capped, per_message_chars=400))[:12000]
-            try:
-                digest = openai_complete(
-                    settings,
-                    CHANNEL_INSTRUCTIONS,
-                    f"channel: #{name}\nmessages this week: {len(channel_messages)}\n\n{transcript}",
-                )
-            except Exception as exc:  # noqa: BLE001
-                digest = f"(要約失敗: {exc})"
-            if digest and digest.strip() != "特になし":
-                channel_summaries.append(f"## #{name} ({len(channel_messages)}件)\n{digest}")
-                summarized += 1
-        else:
-            for line in transcript_lines(channel_messages, per_message_chars=200):
-                minor_lines.append(f"(#{name}) {line}")
+    # Drop noise from forwarded mail / automated posts: keep human (slack_message)
+    # messages always, but for bot_message items keep only the ones AI triage
+    # marks as real business matters (orders, invoices, scheduling, replies).
+    excluded_noise = 0
+    if exclude_mail_noise:
+        bot_messages = [m for m in capped if m.source_type == "bot_message" and compact(m.text, 1)]
+        if bot_messages:
+            keep_keys = classify_keep_important(settings, bot_messages)
+            filtered: list[StoredMessage] = []
+            for message in capped:
+                if message.source_type == "bot_message" and (message.channel_id, message.ts) not in keep_keys:
+                    excluded_noise += 1
+                    continue
+                filtered.append(message)
+            capped = filtered
 
-    reduce_parts: list[str] = []
-    if channel_summaries:
-        reduce_parts.append("\n\n".join(channel_summaries))
-    if minor_lines:
-        reduce_parts.append("## その他の小さな動き\n" + "\n".join(minor_lines[:120]))
-    reduce_input = "\n\n".join(reduce_parts)[:45000]
+    index_to_message: dict[int, StoredMessage] = {}
+    source_lines: list[str] = []
+    index = 0
+    for message in capped:
+        if index >= max_total_sources:
+            break
+        body_text = compact(message.text, 300)
+        if not body_text:
+            continue
+        index += 1
+        index_to_message[index] = message
+        name = message.channel_name or message.channel_id
+        who = message.user_name or ("メール" if message.source_type == "bot_message" else (message.user_id or "unknown"))
+        when = message_datetime_jst(message)[:16]  # YYYY-MM-DD HH:MM
+        source_lines.append(f"[{index}] (#{name}) {when} {who}: {body_text}")
+
+    reduce_input = "\n".join(source_lines)[:48000]
 
     if not reduce_input.strip():
         body = "今週は目立った決定事項・要フォロー・新規の動きはありませんでした。"
     else:
         try:
-            body = openai_complete(settings, REPORT_INSTRUCTIONS, reduce_input, timeout=150)
+            raw = openai_complete(settings, REPORT_INSTRUCTIONS, reduce_input, timeout=150)
+            body = linkify_citations(raw, index_to_message)
         except Exception as exc:  # noqa: BLE001
             body = f"レポート生成に失敗しました: {exc}"
 
@@ -197,7 +321,8 @@ def build_report(settings, days: int, min_channel_messages: int, max_messages_pe
     stats = {
         "channels": len(by_channel),
         "messages": len(messages),
-        "summarized_channels": summarized,
+        "sources_used": index,
+        "excluded_noise": excluded_noise,
     }
     return f"{header}\n{body}", stats
 
@@ -209,6 +334,8 @@ def main() -> None:
                         help="Channels with at least this many messages get an AI summary; smaller ones are listed raw")
     parser.add_argument("--max-messages-per-channel", type=int, default=80,
                         help="Cap messages per channel fed to the summarizer (most recent kept)")
+    parser.add_argument("--keep-mail-noise", action="store_true",
+                        help="Do NOT filter forwarded mail/automated posts (by default sales/notification/spam mail is dropped)")
     parser.add_argument("--post", action="store_true", help="Actually post to Slack (otherwise dry run / console only)")
     parser.add_argument("--channel", help="Target Slack channel ID for --post, e.g. C0AKHJTU2H2")
     args = parser.parse_args()
@@ -227,6 +354,7 @@ def main() -> None:
         min_channel_messages=args.min_channel_messages,
         max_messages_per_channel=args.max_messages_per_channel,
         own_user_id=own_user_id,
+        exclude_mail_noise=not args.keep_mail_noise,
     )
 
     print("=" * 60)
