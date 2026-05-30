@@ -128,6 +128,156 @@ REPORT_INSTRUCTIONS = (
 
 CITATION_RE = re.compile(r"\[(\d{1,3})\]")
 
+# Mar5aux email-forwarding posts look like:
+#   *From:* "name" <addr@example.com>
+#   *件名:* Subject Line
+# These regexes pull out those fields so the noise appendix is scannable.
+MAIL_FROM_RE = re.compile(r"\*From:\*\s*(.+)")
+MAIL_SUBJECT_RE = re.compile(r"\*件名:\*\s*(.+)")
+
+
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def extract_mail_summary(text: str) -> tuple[str, str]:
+    """Pull a short (sender, subject) pair out of a forwarded-email post.
+
+    Falls back to empty strings if the text is not an email-shaped post.
+    """
+    if not text:
+        return "", ""
+    sender = ""
+    subject = ""
+    m = MAIL_FROM_RE.search(text)
+    if m:
+        sender = m.group(1).strip()
+    s = MAIL_SUBJECT_RE.search(text)
+    if s:
+        subject = s.group(1).strip()
+    return sender, subject
+
+
+def extract_sender_email(sender: str) -> str:
+    """Pull the email address out of a 'From:' field for dedup purposes.
+
+    Display names can be forged independently per message ('"c:/" <real@addr>',
+    '"../" <real@addr>'), so dedup keyed on the display name lets the same
+    attacker fill the noise list. The email address itself is more stable.
+    """
+    if not sender:
+        return ""
+    match = EMAIL_RE.search(sender)
+    return match.group(0).lower() if match else sender.lower()
+
+
+# Subject / body patterns that are very likely vulnerability scanning probes
+# (path traversal, request for system files, raw URI references).  We surface
+# these in their own "セキュリティ要注意" bucket so the user does not miss them
+# inside the regular noise dump.
+SUSPICIOUS_PATTERNS = (
+    "/etc/passwd",
+    "\\windows\\system",
+    "/windows/system",
+    "web-inf",
+    "wp-config",
+    "../../",
+    "..\\..",
+    ".env",
+    "boot.ini",
+    "shadow",
+    "id_rsa",
+)
+
+
+def looks_suspicious(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(pattern in lowered for pattern in SUSPICIOUS_PATTERNS)
+
+
+def _format_noise_line(message: StoredMessage) -> str:
+    sender, subject = extract_mail_summary(message.text)
+    compact_sender = compact(sender, 60) or "—"
+    compact_subject = compact(subject, 80) or compact(message.text, 80)
+    when = message_datetime_jst(message)[5:10]  # MM-DD
+    channel = message.channel_name or message.channel_id
+    link = f" <{message.permalink}|🔗開く>" if message.permalink else ""
+    return f"• ({when} #{channel}) From: {compact_sender} / 件名: {compact_subject}{link}"
+
+
+def format_noise_appendix(
+    excluded: list[StoredMessage],
+    per_sender: int = 2,
+    noise_limit: int = 25,
+    suspicious_limit: int = 10,
+) -> str:
+    """Render the excluded-as-noise list so the user can scan for false drops.
+
+    Two buckets are shown:
+
+    1. *セキュリティ要注意 (path traversal, system files, …)* — anything matching
+       a suspicious pattern. These are surfaced first because they often signal
+       reconnaissance attempts that the user actually wants to know about.
+    2. *AIがノイズ判定したメール* — everything else, deduplicated to at most
+       ``per_sender`` items per (sender, channel) so a single bulk newsletter
+       does not crowd out other false-positive candidates.
+    """
+    if not excluded:
+        return ""
+
+    excluded = sorted(
+        excluded,
+        key=lambda m: float(m.ts) if m.ts.replace(".", "").isdigit() else 0.0,
+        reverse=True,
+    )
+
+    suspicious = [m for m in excluded if looks_suspicious(m.text)]
+    regular = [m for m in excluded if not looks_suspicious(m.text)]
+
+    # Diversify the regular bucket: cap per (sender_email, channel) so a single
+    # bulk newsletter or a forging spammer cannot eat the whole list. We dedupe
+    # on the parsed email address rather than the raw display name because
+    # attackers vary the display name per message to slip past simple dedup.
+    seen_counts: dict[tuple[str, str], int] = defaultdict(int)
+    diversified: list[StoredMessage] = []
+    for message in regular:
+        sender, _ = extract_mail_summary(message.text)
+        key = (extract_sender_email(sender), message.channel_id)
+        if seen_counts[key] >= per_sender:
+            continue
+        seen_counts[key] += 1
+        diversified.append(message)
+        if len(diversified) >= noise_limit:
+            break
+
+    lines: list[str] = []
+
+    if suspicious:
+        shown_susp = suspicious[:suspicious_limit]
+        lines.extend([
+            "",
+            "*【⚠️ セキュリティ要注意（攻撃の可能性）】*",
+            f"_path traversal や system file 要求などの不審なパターンを検知（{len(suspicious)}件中{len(shown_susp)}件表示）。"
+            f"通常の問い合わせか確認してください。_",
+        ])
+        for message in shown_susp:
+            lines.append(_format_noise_line(message))
+        if len(suspicious) > suspicious_limit:
+            lines.append(f"_他 {len(suspicious) - suspicious_limit} 件は省略_")
+
+    if diversified:
+        lines.extend([
+            "",
+            "*【参考: AIがノイズ判定したメール（要チェック）】*",
+            f"_営業・通知・自動配信などとして除外（除外合計{len(regular)}件、送信者ごとに最大{per_sender}件まで{len(diversified)}件表示）。"
+            f"重要なメールが紛れていないか流し読みで確認してください。_",
+        ])
+        for message in diversified:
+            lines.append(_format_noise_line(message))
+
+    return "\n".join(lines)
+
 TRIAGE_INSTRUCTIONS = (
     "You triage forwarded emails and automated Slack messages for an apparel company. "
     "Each numbered item is one message. Return JSON only: a list of objects {\"n\": int, \"keep\": bool}. "
@@ -278,7 +428,11 @@ def build_report(settings, days: int, min_channel_messages: int, max_messages_pe
     # Drop noise from forwarded mail / automated posts: keep human (slack_message)
     # messages always, but for bot_message items keep only the ones AI triage
     # marks as real business matters (orders, invoices, scheduling, replies).
+    # We keep the excluded items in a separate list so the report can show them
+    # at the end as a "possibly-noise" appendix — the user wants to be able to
+    # spot any real mail that the triage misclassified.
     excluded_noise = 0
+    excluded_messages: list[StoredMessage] = []
     if exclude_mail_noise:
         bot_messages = [m for m in capped if m.source_type == "bot_message" and compact(m.text, 1)]
         if bot_messages:
@@ -287,6 +441,7 @@ def build_report(settings, days: int, min_channel_messages: int, max_messages_pe
             for message in capped:
                 if message.source_type == "bot_message" and (message.channel_id, message.ts) not in keep_keys:
                     excluded_noise += 1
+                    excluded_messages.append(message)
                     continue
                 filtered.append(message)
             capped = filtered
@@ -317,6 +472,10 @@ def build_report(settings, days: int, min_channel_messages: int, max_messages_pe
             body = linkify_citations(raw, index_to_message)
         except Exception as exc:  # noqa: BLE001
             body = f"レポート生成に失敗しました: {exc}"
+
+    noise_appendix = format_noise_appendix(excluded_messages)
+    if noise_appendix:
+        body = f"{body}\n\n{noise_appendix}"
 
     header = (
         f"*📊 Slack週次レポート* "
