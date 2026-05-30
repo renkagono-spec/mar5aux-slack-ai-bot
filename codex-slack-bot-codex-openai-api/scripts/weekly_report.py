@@ -208,73 +208,41 @@ def _format_noise_line(message: StoredMessage) -> str:
 
 def format_noise_appendix(
     excluded: list[StoredMessage],
-    per_sender: int = 2,
-    noise_limit: int = 25,
     suspicious_limit: int = 10,
 ) -> str:
-    """Render the excluded-as-noise list so the user can scan for false drops.
+    """Surface only suspicious / attack-shaped mail from the excluded set.
 
-    Two buckets are shown:
-
-    1. *セキュリティ要注意 (path traversal, system files, …)* — anything matching
-       a suspicious pattern. These are surfaced first because they often signal
-       reconnaissance attempts that the user actually wants to know about.
-    2. *AIがノイズ判定したメール* — everything else, deduplicated to at most
-       ``per_sender`` items per (sender, channel) so a single bulk newsletter
-       does not crowd out other false-positive candidates.
+    The regular "营業・通知" noise bucket is intentionally not shown: the user
+    asked to keep the report focused. We still surface forwarded mail that
+    matches well-known attack reconnaissance patterns (path traversal, system
+    file requests, common probe paths) because those are something the user
+    almost certainly wants to know about.
     """
     if not excluded:
         return ""
 
-    excluded = sorted(
-        excluded,
+    suspicious = [m for m in excluded if looks_suspicious(m.text)]
+    if not suspicious:
+        return ""
+
+    suspicious = sorted(
+        suspicious,
         key=lambda m: float(m.ts) if m.ts.replace(".", "").isdigit() else 0.0,
         reverse=True,
     )
+    shown = suspicious[:suspicious_limit]
 
-    suspicious = [m for m in excluded if looks_suspicious(m.text)]
-    regular = [m for m in excluded if not looks_suspicious(m.text)]
-
-    # Diversify the regular bucket: cap per (sender_email, channel) so a single
-    # bulk newsletter or a forging spammer cannot eat the whole list. We dedupe
-    # on the parsed email address rather than the raw display name because
-    # attackers vary the display name per message to slip past simple dedup.
-    seen_counts: dict[tuple[str, str], int] = defaultdict(int)
-    diversified: list[StoredMessage] = []
-    for message in regular:
-        sender, _ = extract_mail_summary(message.text)
-        key = (extract_sender_email(sender), message.channel_id)
-        if seen_counts[key] >= per_sender:
-            continue
-        seen_counts[key] += 1
-        diversified.append(message)
-        if len(diversified) >= noise_limit:
-            break
-
-    lines: list[str] = []
-
-    if suspicious:
-        shown_susp = suspicious[:suspicious_limit]
-        lines.extend([
-            "",
-            "*【⚠️ セキュリティ要注意（攻撃の可能性）】*",
-            f"_path traversal や system file 要求などの不審なパターンを検知（{len(suspicious)}件中{len(shown_susp)}件表示）。"
-            f"通常の問い合わせか確認してください。_",
-        ])
-        for message in shown_susp:
-            lines.append(_format_noise_line(message))
-        if len(suspicious) > suspicious_limit:
-            lines.append(f"_他 {len(suspicious) - suspicious_limit} 件は省略_")
-
-    if diversified:
-        lines.extend([
-            "",
-            "*【参考: AIがノイズ判定したメール（要チェック）】*",
-            f"_営業・通知・自動配信などとして除外（除外合計{len(regular)}件、送信者ごとに最大{per_sender}件まで{len(diversified)}件表示）。"
-            f"重要なメールが紛れていないか流し読みで確認してください。_",
-        ])
-        for message in diversified:
-            lines.append(_format_noise_line(message))
+    lines: list[str] = [
+        "",
+        "*【⚠️ セキュリティ要注意（攻撃の可能性）】*",
+        f"_お問い合わせフォーム等への自動脆弱性スキャン疑い（path traversal、システムファイル要求など）。"
+        f"検知{len(suspicious)}件中{len(shown)}件を新しい順で表示。"
+        f"内容を確認の上、必要なら送信元のブロックやフォームの入力サニタイズ確認を。_",
+    ]
+    for message in shown:
+        lines.append(_format_noise_line(message))
+    if len(suspicious) > suspicious_limit:
+        lines.append(f"_他 {len(suspicious) - suspicious_limit} 件は省略_")
 
     return "\n".join(lines)
 
