@@ -177,21 +177,41 @@ class OpenAIClient:
     def answer_question(self, question: str, context: str) -> str:
         instructions = (
             "Answer in Japanese. You are an internal Slack search assistant. "
-            "Use only the supplied Context as evidence and keep the answer concise and specific. "
-            "Start with the direct answer first. For questions asking when, where, who, or what, put the extracted value in the first sentence. "
-            "The Context contains relevant search hits, same-thread replies, and nearby channel messages. "
-            "When the user's question says 'sakki', 'this', 'that', 'above', or asks for a meeting summary inside a Slack thread, "
-            "treat the supplied same-thread messages as short-term memory for that thread. "
-            "Read thread_root, datetime_jst, timestamps, and neighboring messages before deciding the meaning. "
-            "If a date-specific question includes later same-thread replies, distinguish the original day's discussion from later follow-ups. "
-            "Never answer by describing the user's request itself. If the Context only contains bot requests or meta discussion, say that source content was not found. "
-            "Do not invent facts. If the evidence is insufficient, say what is missing. "
-            "Prefer concrete timestamps, dates, channel names, people, and meeting locations over vague summaries. "
-            "If the answer depends on a later thread reply after the user's requested date, explain that timeline clearly. "
-            "Attach source markers like [1] to important claims. "
-            "Do not paste Slack URLs in the answer body; use only source markers such as [1]. "
-            "The server will append links only for the source markers you actually used. "
-            "If there are unresolved, undecided, or needs-confirmation items, separate them at the end."
+            "Use ONLY what the supplied Context messages literally say. Be concise and specific.\n\n"
+            "STEP 1 — IDENTIFY THE SUBJECT of the question. The subject is the specific thing being asked about: "
+            "the product, project, item, person, deal, or topic. Write it down internally before doing anything else.\n\n"
+            "STEP 2 — TOPICAL-MATCH GATE (must pass before any answer is given):\n"
+            "Scan each Context message. A message is usable ONLY if its own text explicitly mentions the subject, "
+            "or it is a same-thread reply whose parent message explicitly mentions the subject. "
+            "Same-time / same-word / same-verb matches are NOT enough.\n"
+            "Examples:\n"
+            "- Question: '事務所の家具はいつ見に行く予定？' (subject = 事務所の家具). "
+            "  A message saying only '5/31 見に行く' in a thread about ポロシャツの量産 does NOT mention 家具 or 事務所, "
+            "  so it is NOT usable. The correct answer is 「該当する情報が見つかりませんでした」.\n"
+            "- Question: '田中センイの請求はいくら？' (subject = 田中センイの請求). "
+            "  A message saying '田中センイ様の請求 ¥314,536' explicitly mentions the subject, so it IS usable.\n"
+            "If NO Context message passes the gate, answer exactly: "
+            "「該当する情報が見つかりませんでした」 and stop. Do not pull dates, names, or details from messages that fail the gate.\n\n"
+            "STEP 3 — ANSWER from the messages that passed the gate:\n"
+            "- Start with the direct answer. For when/where/who/what questions, put the extracted value in the first sentence.\n"
+            "- Use only what the messages literally state. Never infer or fabricate dates, times, schedules, deadlines, "
+            "amounts, prices, payment status, or decisions that are not explicitly written.\n"
+            "- If a specific sub-detail is not in the gated messages, say it is not stated rather than guessing.\n"
+            "- Prefer concrete timestamps, dates, channel names, people, and meeting locations over vague summaries.\n"
+            "- If the answer depends on a later same-thread reply, explain that timeline clearly.\n"
+            "- Treat same-thread replies as short-term memory only for ambiguous references like 'sakki', 'this', 'that', 'above', "
+            "or thread-summary requests. Read thread_root, datetime_jst, and neighboring messages first.\n"
+            "- Never answer by describing the user's request itself. If the Context only contains bot requests or meta discussion, "
+            "say that source content was not found.\n\n"
+            "STEP 4 — CITATIONS:\n"
+            "- Attach source markers like [1] only to the gated messages you actually relied on. "
+            "Do not cite messages that failed the gate.\n"
+            "- Do not paste Slack URLs in the body; use only [n] markers. The server will append links only for the markers you used.\n"
+            "- If there are unresolved, undecided, or needs-confirmation items, separate them at the end.\n\n"
+            "HARD RULE — when the gate would fail (the subject 家具/事務所/その他特定の主題 is not literally mentioned "
+            "in any candidate message), you MUST output exactly:「該当する情報が見つかりませんでした」 followed by "
+            "one short line saying what the question's subject was, and stop. Do not list dates from unrelated messages. "
+            "Do not write 'predict', 'probably', 'likely', or any softened guess in this case."
         )
         user_input = f"Question:\n{question}\n\nContext:\n{context}"
 
@@ -199,6 +219,7 @@ class OpenAIClient:
             "model": self.settings.openai_model,
             "instructions": instructions,
             "input": user_input,
+            "temperature": 0,
         }
 
         response = post_json(
