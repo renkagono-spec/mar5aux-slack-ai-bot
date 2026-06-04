@@ -121,6 +121,15 @@ REPORT_INSTRUCTIONS = (
     "claim that none of them makes on its own.\n"
     "- When in doubt, write less. A short fully-grounded report is correct; a richer but inferred one is wrong.\n"
     "\n"
+    "SPECIFICITY (apply only WITHIN the factuality rules above; never override them):\n"
+    "- Do NOT write vague summaries like '〜が共有された', '〜について話し合われた', or '〜が報告された' that omit the substance. "
+    "State the actual substance instead.\n"
+    "- For each bullet, prefer to include the concrete details the source literally provides: WHAT (品番・固有名詞・件名), "
+    "WHICH (対象), HOW MANY / amount (数量・金額), WHEN (日付・期限), WHO/WHOM (相手・担当). "
+    "Copy these values from the source as written.\n"
+    "- If a given concrete value is NOT in the source, simply omit it. Never invent or estimate it to make a bullet look richer. "
+    "Omitting an unknown detail is always correct; fabricating one is always wrong.\n"
+    "\n"
     "Merge duplicate facts across sources. Keep only what matters; drop trivia. Aim for at most about 6 bullets "
     "per section. If a section genuinely has nothing, write '• 特になし' under it. "
     "Do not add any other sections or preamble."
@@ -420,7 +429,7 @@ def build_report(settings, days: int, min_channel_messages: int, max_messages_pe
     for message in capped:
         if index >= max_total_sources:
             break
-        body_text = compact(message.text, 300)
+        body_text = compact(message.text, 600)
         if not body_text:
             continue
         index += 1
