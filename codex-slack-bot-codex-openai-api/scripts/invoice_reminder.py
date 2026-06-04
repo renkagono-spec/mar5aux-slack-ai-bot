@@ -291,9 +291,10 @@ def main() -> None:
                         help="Prefix each reminder with a visible 【動作テスト】 banner (for verification posts)")
     parser.add_argument("--limit", type=int, default=0,
                         help="Only post to at most this many threads (0 = no limit). Useful for a single test post.")
-    parser.add_argument("--mention", default="",
-                        help="Comma-separated mention targets to prepend, e.g. 'U0AHU5PJUP6', 'S0AMJKD8EB1', "
-                             "'@here', '@channel'. Bare handles like '@system-jin' cannot be resolved to an id.")
+    parser.add_argument("--mention", default="system-jin",
+                        help="Comma-separated mention targets to prepend (default: system-jin = the 4-person "
+                             "System-JIN group). Accepts known handles (system-jin/system-team), user ids (U…), "
+                             "group ids (S…), @here, @channel. Pass --mention \"\" to send with no mention.")
     args = parser.parse_args()
 
     mention_prefix = ""
