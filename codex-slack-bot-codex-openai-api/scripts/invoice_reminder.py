@@ -29,6 +29,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
+import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -219,10 +220,51 @@ def format_amount(amount: str) -> str:
     return raw
 
 
-def build_reminder_text(target: date, items: list[dict]) -> str:
+# Known user-group handles -> subteam id. The bot token lacks usergroups:read,
+# so handles cannot be resolved via the API; these ids were confirmed against the
+# "【グループメンションについて】" guide message in #all-0_全体.
+KNOWN_GROUPS = {
+    "system-jin": "S0B7DKTNF4H",   # 内藤/るか/坪井 + JIN (4 people)
+    "system-team": "S0AMJKD8EB1",  # 内藤/るか/坪井 (3 people)
+}
+
+
+def normalize_mention(token: str) -> str | None:
+    """Turn a CLI mention token into Slack's mention syntax, or None if unknown.
+
+    Accepts: already-formatted '<...>'; '@channel'/'@here'; a user id
+    'U…'/'W…'; a user-group id 'S…'; or a known group handle such as
+    'system-jin' (see KNOWN_GROUPS). An unknown bare handle returns None and the
+    caller warns."""
+    t = (token or "").strip()
+    if not t:
+        return None
+    if t.startswith("<") and t.endswith(">"):
+        return t
+    bare = t.lstrip("@")
+    if bare in ("channel", "everyone"):
+        return "<!channel>"
+    if bare == "here":
+        return "<!here>"
+    if bare.lower() in KNOWN_GROUPS:
+        return f"<!subteam^{KNOWN_GROUPS[bare.lower()]}>"
+    if re.fullmatch(r"[UW][A-Z0-9]{6,}", bare):
+        return f"<@{bare}>"
+    if re.fullmatch(r"S[A-Z0-9]{6,}", bare):
+        return f"<!subteam^{bare}>"
+    return None
+
+
+def build_reminder_text(target: date, items: list[dict], test: bool = False,
+                        mention_prefix: str = "") -> str:
     weekday = _JP_WEEKDAYS[target.weekday()]
     header = f"⏰ *支払期限リマインド｜明日 {target.month}/{target.day}({weekday}) が期限*"
-    lines = [header, "未入金の可能性がある請求です。ご確認をお願いします。"]
+    lines = []
+    if test:
+        lines.append("🧪 *【動作テスト】* これはリマインド機能の動作確認用です。確認後に削除してください。")
+    if mention_prefix:
+        lines.append(mention_prefix)
+    lines.extend([header, "未入金の可能性がある請求です。ご確認をお願いします。"])
     for item in items:
         vendor = item["vendor"] or "（取引先不明）"
         amount = format_amount(item["amount"])
@@ -245,7 +287,29 @@ def main() -> None:
                         help="Also remind for invoices already marked 入金済み (default: skip them)")
     parser.add_argument("--post", action="store_true",
                         help="Actually post reminders into Slack threads (otherwise dry run / console only)")
+    parser.add_argument("--test", action="store_true",
+                        help="Prefix each reminder with a visible 【動作テスト】 banner (for verification posts)")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="Only post to at most this many threads (0 = no limit). Useful for a single test post.")
+    parser.add_argument("--mention", default="",
+                        help="Comma-separated mention targets to prepend, e.g. 'U0AHU5PJUP6', 'S0AMJKD8EB1', "
+                             "'@here', '@channel'. Bare handles like '@system-jin' cannot be resolved to an id.")
     args = parser.parse_args()
+
+    mention_prefix = ""
+    if args.mention:
+        resolved: list[str] = []
+        for token in args.mention.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            m = normalize_mention(token)
+            if m:
+                resolved.append(m)
+            else:
+                print(f"[警告] メンション '{token}' はIDに解決できないため無視します "
+                      f"(<@U...> / <!subteam^S...> / @here / @channel のいずれかで指定してください)")
+        mention_prefix = " ".join(resolved)
 
     settings = get_settings()
     storage = Storage(settings)
@@ -306,11 +370,16 @@ def main() -> None:
         message = index_to_message[r["n"]]
         groups[(message.channel_id, thread_anchor(message))].append(r)
 
-    print(f"\n→ リマインド対象 {len(matches)}件 / スレッド {len(groups)}件:")
+    group_items = list(groups.items())
+    if args.limit and args.limit > 0:
+        group_items = group_items[:args.limit]
+
+    print(f"\n→ リマインド対象 {len(matches)}件 / スレッド {len(groups)}件"
+          + (f"（うち {len(group_items)}件に投稿）" if args.limit else "") + ":")
     slack_client = SlackClient(settings) if args.post else None
     posted = 0
-    for (channel_id, anchor), items in groups.items():
-        text = build_reminder_text(target, items)
+    for (channel_id, anchor), items in group_items:
+        text = build_reminder_text(target, items, test=args.test, mention_prefix=mention_prefix)
         permalink = index_to_message[items[0]["n"]].permalink or "(no link)"
         print("\n--- スレッド " + f"{channel_id} @ {anchor}  {permalink}")
         print(text)
