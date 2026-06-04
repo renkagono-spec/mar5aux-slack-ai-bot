@@ -80,6 +80,48 @@ def compact(text: str, limit: int) -> str:
     return collapsed[:limit] + ("…" if len(collapsed) > limit else "")
 
 
+# Single-day relative-time words and their day offset from the post date.
+# Only unambiguous ones are listed: range words (今週/来週/月末) and 当日
+# (refers to some event day, not the post day) are intentionally excluded so
+# we never resolve them to a wrong date.
+_RELATIVE_DAY_OFFSETS = {
+    "本日": 0, "今日": 0, "今朝": 0, "今晩": 0, "今夜": 0,
+    "明後日": 2, "明日": 1, "一昨日": -2, "昨日": -1,
+}
+# Longer words first so 明後日 / 一昨日 win over 明日 / 昨日. The lookahead skips
+# words that already carry a (M/D) so re-runs stay idempotent.
+_RELATIVE_DAY_RE = re.compile(
+    "(" + "|".join(_RELATIVE_DAY_OFFSETS) + r")(?!\s*[（(])"
+)
+
+
+def annotate_relative_dates(text: str, post_date) -> str:
+    """Append the absolute date to relative-day words, e.g. '本日' -> '本日(5/29)'.
+
+    post_date is the message's own JST date, so each word resolves against the
+    day it was written. This is done deterministically in code because the model
+    cannot be trusted to do calendar math reliably.
+    """
+    if not text or post_date is None:
+        return text
+
+    def repl(match: "re.Match[str]") -> str:
+        word = match.group(1)
+        resolved = post_date + timedelta(days=_RELATIVE_DAY_OFFSETS[word])
+        return f"{word}({resolved.month}/{resolved.day})"
+
+    return _RELATIVE_DAY_RE.sub(repl, text)
+
+
+def message_post_date(message: StoredMessage):
+    """Return the message's JST calendar date (a date object) or None."""
+    stamp = message_datetime_jst(message)[:10]  # YYYY-MM-DD
+    try:
+        return datetime.strptime(stamp, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
 def transcript_lines(messages: list[StoredMessage], per_message_chars: int) -> list[str]:
     lines: list[str] = []
     for message in messages:
@@ -129,6 +171,10 @@ REPORT_INSTRUCTIONS = (
     "Copy these values from the source as written.\n"
     "- If a given concrete value is NOT in the source, simply omit it. Never invent or estimate it to make a bullet look richer. "
     "Omitting an unknown detail is always correct; fabricating one is always wrong.\n"
+    "- RELATIVE DATES are already resolved for you: the source text annotates words like 本日/今日/明日/明後日/昨日/一昨日 "
+    "with their absolute date in parentheses, e.g. '本日(5/29)発送'. ALWAYS carry that '(M/D)' through verbatim into your "
+    "bullet — never drop it and never alter the number. If a relative word has NO parenthesized date (e.g. 来週, 月末, 当日), "
+    "it was deliberately left unresolved; keep it as written and do not guess a date for it.\n"
     "\n"
     "Merge duplicate facts across sources. Keep only what matters; drop trivia. Aim for at most about 6 bullets "
     "per section. If a section genuinely has nothing, write '• 特になし' under it. "
@@ -432,6 +478,7 @@ def build_report(settings, days: int, min_channel_messages: int, max_messages_pe
         body_text = compact(message.text, 600)
         if not body_text:
             continue
+        body_text = annotate_relative_dates(body_text, message_post_date(message))
         index += 1
         index_to_message[index] = message
         name = message.channel_name or message.channel_id
