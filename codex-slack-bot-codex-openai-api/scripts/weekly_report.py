@@ -402,7 +402,8 @@ def linkify_citations(report_text: str, index_to_message: dict[int, StoredMessag
 
 def build_report(settings, days: int, min_channel_messages: int, max_messages_per_channel: int,
                  own_user_id: str | None, max_total_sources: int = 260,
-                 exclude_mail_noise: bool = True) -> tuple[str, dict]:
+                 exclude_mail_noise: bool = True,
+                 oldest_ts_override: str | None = None) -> tuple[str, dict]:
     storage = Storage(settings)
     storage.init_schema()
 
@@ -411,8 +412,14 @@ def build_report(settings, days: int, min_channel_messages: int, max_messages_pe
         return "対象ワークスペースのデータがありません。", {"channels": 0, "messages": 0}
 
     now = datetime.now(JST)
-    start = now - timedelta(days=days)
-    start_ts = str(start.timestamp())
+    if oldest_ts_override:
+        # Continue from the previous report: cover exactly the span since it
+        # was posted, so consecutive reports never overlap and never leave gaps.
+        start = datetime.fromtimestamp(float(oldest_ts_override), JST)
+        start_ts = oldest_ts_override
+    else:
+        start = now - timedelta(days=days)
+        start_ts = str(start.timestamp())
     end_ts = str(now.timestamp())
 
     messages = storage.list_messages(
@@ -515,6 +522,29 @@ def build_report(settings, days: int, min_channel_messages: int, max_messages_pe
     return f"{header}\n{body}", stats
 
 
+# NOTE: Slack returns the posted 📊 emoji as ':bar_chart:' in history text, so
+# the marker must not include the emoji itself.
+REPORT_HEADER_MARK = "Slack週次レポート"
+
+
+def find_last_report_ts(slack_client: SlackClient, channel: str) -> str | None:
+    """Return the ts of the most recent report previously posted in `channel`.
+
+    Reports are recognized by their fixed header mark, so Slack itself acts as
+    the record of how far reporting has progressed — no local state file.
+    """
+    cursor = None
+    for _ in range(5):  # up to ~1000 messages back
+        response = slack_client.conversation_history(channel=channel, limit=200, cursor=cursor)
+        for item in response.get("messages", []):  # newest first
+            if REPORT_HEADER_MARK in (item.get("text") or "")[:80]:
+                return item.get("ts")
+        cursor = (response.get("response_metadata") or {}).get("next_cursor")
+        if not cursor:
+            break
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate a weekly Slack digest from the bot database.")
     parser.add_argument("--days", type=int, default=7, help="How many days back to include (default 7)")
@@ -526,15 +556,31 @@ def main() -> None:
                         help="Do NOT filter forwarded mail/automated posts (by default sales/notification/spam mail is dropped)")
     parser.add_argument("--post", action="store_true", help="Actually post to Slack (otherwise dry run / console only)")
     parser.add_argument("--channel", help="Target Slack channel ID for --post, e.g. C0AKHJTU2H2")
+    parser.add_argument("--since-last", action="store_true",
+                        help="Start from the previous report posted in --channel instead of --days back, "
+                             "so consecutive reports never overlap. Falls back to --days if none is found.")
     args = parser.parse_args()
 
     settings = get_settings()
+    slack_client = SlackClient(settings)
 
     own_user_id = None
     try:
-        own_user_id = SlackClient(settings).own_user_id()
+        own_user_id = slack_client.own_user_id()
     except Exception:
         own_user_id = None
+
+    oldest_ts_override = None
+    if args.since_last:
+        if not args.channel:
+            print("--since-last には --channel が必要です(前回レポートを探すチャンネル)。")
+            return
+        oldest_ts_override = find_last_report_ts(slack_client, args.channel)
+        if oldest_ts_override:
+            since = datetime.fromtimestamp(float(oldest_ts_override), JST)
+            print(f"[since-last] 前回レポート: {since.strftime('%Y-%m-%d %H:%M')} 以降を対象にします。")
+        else:
+            print(f"[since-last] 前回レポートが見つからないため --days {args.days} で実行します。")
 
     report, stats = build_report(
         settings,
@@ -543,6 +589,7 @@ def main() -> None:
         max_messages_per_channel=args.max_messages_per_channel,
         own_user_id=own_user_id,
         exclude_mail_noise=not args.keep_mail_noise,
+        oldest_ts_override=oldest_ts_override,
     )
 
     print("=" * 60)
@@ -554,7 +601,6 @@ def main() -> None:
         if not args.channel:
             print("\n--post was given but --channel is missing. Nothing posted.")
             return
-        slack_client = SlackClient(settings)
         slack_client.post_message(channel=args.channel, text=report[:39000])
         print(f"\nPosted to channel {args.channel}.")
     else:
