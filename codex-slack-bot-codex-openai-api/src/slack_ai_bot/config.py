@@ -102,7 +102,12 @@ def get_settings() -> Settings:
         openai_answer_model=os.getenv("OPENAI_ANSWER_MODEL", "gpt-5.4-mini"),
         openai_embedding_model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
         search_scope=search_scope,
-        max_search_rows=env_int("MAX_SEARCH_ROWS", 5000),
+        # Each candidate row is loaded WITH its 1536-dim embedding (~70KB once
+        # parsed into Python floats). At 5000 rows x two queries this peaked well
+        # over the instance's 512MB limit and OOM-restarted the service mid
+        # answer. 1200 keeps peak memory safe; keyword matches are still found by
+        # the DB-side term filter, so search quality is largely preserved.
+        max_search_rows=env_int("MAX_SEARCH_ROWS", 1200),
         max_context_messages=env_int("MAX_CONTEXT_MESSAGES", 12),
         context_neighbor_messages=env_int("CONTEXT_NEIGHBOR_MESSAGES", 2),
         max_context_chars=env_int("MAX_CONTEXT_CHARS", 26000),
