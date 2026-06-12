@@ -51,6 +51,17 @@ class SlackClient:
             payload["thread_ts"] = thread_ts
         return self.api_post("chat.postMessage", payload)
 
+    def update_message(self, channel: str, ts: str, text: str) -> dict[str, Any]:
+        return self.api_post(
+            "chat.update",
+            {
+                "channel": channel,
+                "ts": ts,
+                "text": text,
+                "link_names": False,
+            },
+        )
+
     def add_reaction(self, channel: str, ts: str, name: str) -> None:
         try:
             self.api_post("reactions.add", {"channel": channel, "timestamp": ts, "name": name})

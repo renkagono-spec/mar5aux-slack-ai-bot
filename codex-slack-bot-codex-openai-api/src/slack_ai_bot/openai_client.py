@@ -60,7 +60,7 @@ class OpenAIClient:
         response = post_json(
             "https://api.openai.com/v1/responses",
             {
-                "model": self.settings.openai_model,
+                "model": self.settings.openai_fast_model,
                 "instructions": instructions,
                 "input": f"today_jst={today_jst}\nquestion={question}",
                 "temperature": 0,
@@ -130,7 +130,7 @@ class OpenAIClient:
         response = post_json(
             "https://api.openai.com/v1/responses",
             {
-                "model": self.settings.openai_model,
+                "model": self.settings.openai_fast_model,
                 "instructions": instructions,
                 "input": (
                     f"today_jst={today_jst}\n\n"

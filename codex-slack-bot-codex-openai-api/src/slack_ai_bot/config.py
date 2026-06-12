@@ -48,6 +48,7 @@ class Settings:
     database_url: str | None
     sqlite_path: str
     openai_model: str
+    openai_fast_model: str
     openai_embedding_model: str
     search_scope: str
     max_search_rows: int
@@ -88,6 +89,10 @@ def get_settings() -> Settings:
         database_url=os.getenv("DATABASE_URL") or None,
         sqlite_path=os.getenv("SQLITE_PATH", "data/slack-ai.sqlite3"),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"),
+        # Lighter model for the bot's auxiliary JSON steps (search planning,
+        # follow-up resolution). Defaults to mini so those stay fast even when
+        # OPENAI_MODEL is a heavier model used for the final answer.
+        openai_fast_model=os.getenv("OPENAI_FAST_MODEL", "gpt-5.4-mini"),
         openai_embedding_model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
         search_scope=search_scope,
         max_search_rows=env_int("MAX_SEARCH_ROWS", 5000),

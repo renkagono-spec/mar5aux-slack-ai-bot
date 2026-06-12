@@ -391,6 +391,7 @@ def store_thread_by_ts(
     slack_client: SlackClient,
     openai_client: OpenAIClient,
     settings: Settings,
+    embed: bool = True,
 ) -> int:
     if not channel_id or not thread_ts:
         return 0
@@ -401,7 +402,7 @@ def store_thread_by_ts(
         response = slack_client.conversation_replies(channel=channel_id, ts=thread_ts, cursor=cursor)
         for reply_event in response.get("messages") or []:
             reply_event.setdefault("channel", channel_id)
-            message = message_from_event(payload, reply_event, slack_client, openai_client, settings)
+            message = message_from_event(payload, reply_event, slack_client, openai_client, settings, embed=embed)
             if message:
                 storage.upsert_message(message, raw=reply_event)
                 stored += 1
@@ -431,7 +432,13 @@ def refresh_threads_for_matches(
         seen_roots.add(key)
         roots.append(key)
         try:
-            store_thread_by_ts(payload, message.channel_id, root_ts, storage, slack_client, openai_client, settings)
+            # Refresh thread text only; skip re-embedding (these messages are
+            # already indexed and are used here as answer context, not for
+            # vector search). COALESCE in upsert keeps any existing embedding.
+            store_thread_by_ts(
+                payload, message.channel_id, root_ts, storage,
+                slack_client, openai_client, settings, embed=False,
+            )
         except Exception:
             logging.exception("failed to refresh matched thread")
 
@@ -540,6 +547,31 @@ def handle_app_mention(
     workspace_id = workspace_id_from_payload(payload, event)
     slack_client.add_reaction(channel_id, event["ts"], "eyes")
 
+    # Post an immediate placeholder so the user sees the bot is working, then
+    # edit that same message into the final answer. This keeps the channel to a
+    # single tidy message while removing the "no response" feeling during the
+    # seconds the search + answer take.
+    ack_ts: str | None = None
+    try:
+        ack = slack_client.post_message(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="🔍 過去ログを検索しています…少々お待ちください。",
+        )
+        ack_ts = ack.get("ts")
+    except Exception:
+        logging.exception("failed to post ack message")
+
+    def respond(text: str) -> None:
+        final = (text or "")[:39000]
+        if ack_ts:
+            try:
+                slack_client.update_message(channel=channel_id, ts=ack_ts, text=final)
+                return
+            except Exception:
+                logging.exception("failed to edit ack message; posting a new one instead")
+        slack_client.post_message(channel=channel_id, thread_ts=thread_ts, text=final)
+
     try:
         current_thread_messages: list[StoredMessage] = []
         if event.get("thread_ts"):
@@ -602,15 +634,11 @@ def handle_app_mention(
                 context,
             )
             answer_with_links = answer.rstrip() + format_evidence_links(answer, thread_context_messages)
-            slack_client.post_message(channel=channel_id, thread_ts=thread_ts, text=answer_with_links[:39000])
+            respond(answer_with_links)
             return
 
         if not matches:
-            slack_client.post_message(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                text="No relevant Slack information was found yet. Invite the bot to target channels and backfill history first.",
-            )
+            respond("No relevant Slack information was found yet. Invite the bot to target channels and backfill history first.")
             return
 
         matches = refresh_threads_for_matches(payload, matches, storage, slack_client, openai_client, settings)
@@ -621,11 +649,7 @@ def handle_app_mention(
                 if not any(f"<@{mention_id}>" in message.text for mention_id in excluded_mention_ids)
             ]
         if not matches:
-            slack_client.post_message(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                text="\u691c\u7d22\u3067\u304d\u308b\u53c2\u7167\u5143\u304c\u898b\u3064\u304b\u308a\u307e\u305b\u3093\u3067\u3057\u305f\u3002bot\u3078\u306e\u4f9d\u983c\u6587\u3067\u306f\u306a\u304f\u3001\u5b9f\u969b\u306eSlack\u6295\u7a3f\u304cDB\u306b\u5165\u3063\u3066\u3044\u308b\u304b\u78ba\u8a8d\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
-            )
+            respond("\u691c\u7d22\u3067\u304d\u308b\u53c2\u7167\u5143\u304c\u898b\u3064\u304b\u308a\u307e\u305b\u3093\u3067\u3057\u305f\u3002bot\u3078\u306e\u4f9d\u983c\u6587\u3067\u306f\u306a\u304f\u3001\u5b9f\u969b\u306eSlack\u6295\u7a3f\u304cDB\u306b\u5165\u3063\u3066\u3044\u308b\u304b\u78ba\u8a8d\u3057\u3066\u304f\u3060\u3055\u3044\u3002")
             return
         context = format_context(matches, max_chars=settings.max_context_chars)
         answer_question_text = effective_question
@@ -637,11 +661,7 @@ def handle_app_mention(
             )
         answer = openai_client.answer_question(answer_question_text, context)
         answer_with_links = answer.rstrip() + format_evidence_links(answer, matches)
-        slack_client.post_message(channel=channel_id, thread_ts=thread_ts, text=answer_with_links[:39000])
+        respond(answer_with_links)
     except Exception:
         logging.exception("failed to answer app mention")
-        slack_client.post_message(
-            channel=channel_id,
-            thread_ts=thread_ts,
-            text="An error occurred while answering. Please check the server logs and API key settings.",
-        )
+        respond("回答の生成中にエラーが発生しました。サーバーログとAPIキー設定を確認してください。")
