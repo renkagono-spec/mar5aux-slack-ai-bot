@@ -545,32 +545,12 @@ def handle_app_mention(
 
     question = clean_question(event.get("text", ""))
     workspace_id = workspace_id_from_payload(payload, event)
+    # The 👀 reaction is the only "working" indicator; the answer is posted when
+    # ready. (No placeholder message — the user found it noisy.)
     slack_client.add_reaction(channel_id, event["ts"], "eyes")
 
-    # Post an immediate placeholder so the user sees the bot is working, then
-    # edit that same message into the final answer. This keeps the channel to a
-    # single tidy message while removing the "no response" feeling during the
-    # seconds the search + answer take.
-    ack_ts: str | None = None
-    try:
-        ack = slack_client.post_message(
-            channel=channel_id,
-            thread_ts=thread_ts,
-            text="🔍 過去ログを検索しています…少々お待ちください。",
-        )
-        ack_ts = ack.get("ts")
-    except Exception:
-        logging.exception("failed to post ack message")
-
     def respond(text: str) -> None:
-        final = (text or "")[:39000]
-        if ack_ts:
-            try:
-                slack_client.update_message(channel=channel_id, ts=ack_ts, text=final)
-                return
-            except Exception:
-                logging.exception("failed to edit ack message; posting a new one instead")
-        slack_client.post_message(channel=channel_id, thread_ts=thread_ts, text=final)
+        slack_client.post_message(channel=channel_id, thread_ts=thread_ts, text=(text or "")[:39000])
 
     try:
         current_thread_messages: list[StoredMessage] = []
