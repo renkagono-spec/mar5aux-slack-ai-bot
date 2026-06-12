@@ -49,6 +49,7 @@ class Settings:
     sqlite_path: str
     openai_model: str
     openai_fast_model: str
+    openai_answer_model: str
     openai_embedding_model: str
     search_scope: str
     max_search_rows: int
@@ -93,6 +94,12 @@ def get_settings() -> Settings:
         # follow-up resolution). Defaults to mini so those stay fast even when
         # OPENAI_MODEL is a heavier model used for the final answer.
         openai_fast_model=os.getenv("OPENAI_FAST_MODEL", "gpt-5.4-mini"),
+        # Model for the bot's interactive answer. Defaults to mini because the
+        # heavier gpt-5.4 could not complete within the deployed instance's
+        # resource/time limits (the background task was killed before posting an
+        # answer). Set OPENAI_ANSWER_MODEL=gpt-5.4 only on an instance with
+        # enough memory/CPU headroom.
+        openai_answer_model=os.getenv("OPENAI_ANSWER_MODEL", "gpt-5.4-mini"),
         openai_embedding_model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
         search_scope=search_scope,
         max_search_rows=env_int("MAX_SEARCH_ROWS", 5000),

@@ -216,7 +216,7 @@ class OpenAIClient:
         user_input = f"Question:\n{question}\n\nContext:\n{context}"
 
         payload: dict[str, Any] = {
-            "model": self.settings.openai_model,
+            "model": self.settings.openai_answer_model,
             "instructions": instructions,
             "input": user_input,
             "temperature": 0,
