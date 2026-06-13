@@ -13,3 +13,6 @@ __pycache__/
 diag_*.py
 list_joined.py
 test_openai.py
+
+# Scheduled-task run logs (local runtime output)
+logs/
