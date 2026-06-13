@@ -27,7 +27,6 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-import json
 from pathlib import Path
 import re
 import sys
@@ -35,8 +34,14 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from _report_common import (
+    JsonApiError,
+    compact,
+    most_populated_workspace_id,
+    openai_complete,
+    parse_json_list,
+)
 from slack_ai_bot.config import get_settings
-from slack_ai_bot.http_json import post_json
 from slack_ai_bot.search import JST, message_datetime_jst
 from slack_ai_bot.slack_client import SlackClient
 from slack_ai_bot.storage import Storage, StoredMessage
@@ -44,73 +49,6 @@ from slack_ai_bot.storage import Storage, StoredMessage
 INVOICE_CHANNEL_ID = "C0AQA1P45LG"  # #all-1_請求書
 
 _JP_WEEKDAYS = ["月", "火", "水", "木", "金", "土", "日"]
-
-
-def compact(text: str, limit: int) -> str:
-    collapsed = " ".join((text or "").split())
-    return collapsed[:limit] + ("…" if len(collapsed) > limit else "")
-
-
-def openai_complete(settings, instructions: str, content: str, timeout: int = 120) -> str:
-    response = post_json(
-        "https://api.openai.com/v1/responses",
-        {
-            "model": settings.openai_model,
-            "instructions": instructions,
-            "input": content,
-            "temperature": 0,
-        },
-        headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-        timeout=timeout,
-    )
-    text = response.get("output_text") or ""
-    if not text:
-        chunks: list[str] = []
-        for item in response.get("output", []):
-            for piece in item.get("content", []):
-                if piece.get("type") == "output_text" and piece.get("text"):
-                    chunks.append(piece["text"])
-        text = "\n".join(chunks)
-    return text.strip()
-
-
-def parse_json_list(raw: str) -> list:
-    """Parse a JSON list, tolerating models that omit the [] wrapper."""
-    text = (raw or "").strip()
-    if "[" in text and "]" in text and text.find("[") < text.rfind("]"):
-        snippet = text[text.find("["): text.rfind("]") + 1]
-    elif "{" in text and "}" in text:
-        snippet = "[" + text[text.find("{"): text.rfind("}") + 1] + "]"
-    else:
-        return []
-    try:
-        data = json.loads(snippet)
-    except json.JSONDecodeError:
-        return []
-    return data if isinstance(data, list) else []
-
-
-def most_populated_workspace_id(storage: Storage) -> str | None:
-    with storage.connect() as conn:
-        if storage.backend == "postgres":
-            row = conn.execute(
-                "SELECT workspace_id FROM messages WHERE is_deleted = FALSE "
-                "GROUP BY workspace_id ORDER BY COUNT(*) DESC LIMIT 1"
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT workspace_id FROM messages WHERE is_deleted = 0 "
-                "GROUP BY workspace_id ORDER BY COUNT(*) DESC LIMIT 1"
-            ).fetchone()
-    return dict(row)["workspace_id"] if row else None
-
-
-def message_post_date(message: StoredMessage) -> date | None:
-    stamp = message_datetime_jst(message)[:10]  # YYYY-MM-DD
-    try:
-        return datetime.strptime(stamp, "%Y-%m-%d").date()
-    except ValueError:
-        return None
 
 
 INVOICE_INSTRUCTIONS = (
@@ -255,10 +193,20 @@ def normalize_mention(token: str) -> str | None:
     return None
 
 
+def due_label(due_in_days: int) -> str:
+    """A natural-language prefix for the due day: 本日 / 明日 / 明後日 / N日後."""
+    fixed = {0: "本日", 1: "明日", 2: "明後日"}
+    if due_in_days in fixed:
+        return fixed[due_in_days]
+    return f"{due_in_days}日後" if due_in_days > 2 else ""
+
+
 def build_reminder_text(target: date, items: list[dict], test: bool = False,
-                        mention_prefix: str = "") -> str:
+                        mention_prefix: str = "", due_in_days: int = 1) -> str:
     weekday = _JP_WEEKDAYS[target.weekday()]
-    header = f"⏰ *支払期限リマインド｜明日 {target.month}/{target.day}({weekday}) が期限*"
+    label = due_label(due_in_days)
+    when = f"{label} " if label else ""
+    header = f"⏰ *支払期限リマインド｜{when}{target.month}/{target.day}({weekday}) が期限*"
     lines = []
     if test:
         lines.append("🧪 *【動作テスト】* これはリマインド機能の動作確認用です。確認後に削除してください。")
@@ -343,7 +291,14 @@ def main() -> None:
         print("対象メッセージがありません。")
         return
 
-    records, index_to_message = extract_invoices(settings, messages)
+    try:
+        records, index_to_message = extract_invoices(settings, messages)
+    except JsonApiError as exc:
+        # Fail safe: surface the API error and post nothing, rather than skipping
+        # reminders silently or crashing with a traceback.
+        print(f"\n[エラー] 請求書の抽出に失敗しました（OpenAI API）: {exc}")
+        print("リマインドは送信していません。少し待って再実行してください。")
+        return
 
     # Show every extracted record with a real due date, so the values can be eyeballed.
     dated = [r for r in records if r["due_date"]]
@@ -380,7 +335,8 @@ def main() -> None:
     slack_client = SlackClient(settings) if args.post else None
     posted = 0
     for (channel_id, anchor), items in group_items:
-        text = build_reminder_text(target, items, test=args.test, mention_prefix=mention_prefix)
+        text = build_reminder_text(target, items, test=args.test,
+                                   mention_prefix=mention_prefix, due_in_days=args.due_in_days)
         permalink = index_to_message[items[0]["n"]].permalink or "(no link)"
         print("\n--- スレッド " + f"{channel_id} @ {anchor}  {permalink}")
         print(text)

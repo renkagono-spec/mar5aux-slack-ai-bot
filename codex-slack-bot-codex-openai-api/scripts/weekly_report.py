@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from datetime import datetime, timedelta
-import json
 from pathlib import Path
 import re
 import sys
@@ -30,54 +29,17 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from _report_common import (
+    compact,
+    message_post_date,
+    most_populated_workspace_id,
+    openai_complete,
+    parse_json_list,
+)
 from slack_ai_bot.config import get_settings
-from slack_ai_bot.http_json import post_json
 from slack_ai_bot.search import JST, message_datetime_jst
 from slack_ai_bot.slack_client import SlackClient
 from slack_ai_bot.storage import Storage, StoredMessage
-
-
-def most_populated_workspace_id(storage: Storage) -> str | None:
-    with storage.connect() as conn:
-        if storage.backend == "postgres":
-            row = conn.execute(
-                "SELECT workspace_id FROM messages WHERE is_deleted = FALSE "
-                "GROUP BY workspace_id ORDER BY COUNT(*) DESC LIMIT 1"
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT workspace_id FROM messages WHERE is_deleted = 0 "
-                "GROUP BY workspace_id ORDER BY COUNT(*) DESC LIMIT 1"
-            ).fetchone()
-    return dict(row)["workspace_id"] if row else None
-
-
-def openai_complete(settings, instructions: str, content: str, timeout: int = 120) -> str:
-    response = post_json(
-        "https://api.openai.com/v1/responses",
-        {
-            "model": settings.openai_model,
-            "instructions": instructions,
-            "input": content,
-            "temperature": 0,
-        },
-        headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-        timeout=timeout,
-    )
-    text = response.get("output_text") or ""
-    if not text:
-        chunks: list[str] = []
-        for item in response.get("output", []):
-            for piece in item.get("content", []):
-                if piece.get("type") == "output_text" and piece.get("text"):
-                    chunks.append(piece["text"])
-        text = "\n".join(chunks)
-    return text.strip()
-
-
-def compact(text: str, limit: int) -> str:
-    collapsed = " ".join((text or "").split())
-    return collapsed[:limit] + ("…" if len(collapsed) > limit else "")
 
 
 # Single-day relative-time words and their day offset from the post date.
@@ -111,15 +73,6 @@ def annotate_relative_dates(text: str, post_date) -> str:
         return f"{word}({resolved.month}/{resolved.day})"
 
     return _RELATIVE_DAY_RE.sub(repl, text)
-
-
-def message_post_date(message: StoredMessage):
-    """Return the message's JST calendar date (a date object) or None."""
-    stamp = message_datetime_jst(message)[:10]  # YYYY-MM-DD
-    try:
-        return datetime.strptime(stamp, "%Y-%m-%d").date()
-    except ValueError:
-        return None
 
 
 def transcript_lines(messages: list[StoredMessage], per_message_chars: int) -> list[str]:
@@ -313,26 +266,6 @@ TRIAGE_INSTRUCTIONS = (
 )
 
 
-def parse_json_object_list(raw: str) -> list:
-    """Parse a JSON list of objects, tolerating models that omit the [] wrapper.
-
-    The model sometimes returns ``{"n":1},{"n":2}`` (comma-separated objects with
-    no array brackets). Wrap those before parsing so triage decisions are not lost.
-    """
-    text = (raw or "").strip()
-    if "[" in text and "]" in text and text.find("[") < text.rfind("]"):
-        snippet = text[text.find("["): text.rfind("]") + 1]
-    elif "{" in text and "}" in text:
-        snippet = "[" + text[text.find("{"): text.rfind("}") + 1] + "]"
-    else:
-        return []
-    try:
-        data = json.loads(snippet)
-    except json.JSONDecodeError:
-        return []
-    return data if isinstance(data, list) else []
-
-
 def classify_keep_important(settings, messages: list[StoredMessage], batch_size: int = 40) -> set[tuple[str, str]]:
     """Return the set of (channel_id, ts) for bot/email messages worth keeping.
 
@@ -345,7 +278,7 @@ def classify_keep_important(settings, messages: list[StoredMessage], batch_size:
         lines = [f"[{i + 1}] {compact(m.text, 400)}" for i, m in enumerate(batch)]
         try:
             raw = openai_complete(settings, TRIAGE_INSTRUCTIONS, "\n\n".join(lines), timeout=120)
-            parsed = parse_json_object_list(raw)
+            parsed = parse_json_list(raw)
             if not parsed:
                 raise ValueError("empty triage result")
             decided: dict[int, bool] = {}
@@ -400,7 +333,7 @@ def linkify_citations(report_text: str, index_to_message: dict[int, StoredMessag
     return "\n".join(out_lines)
 
 
-def build_report(settings, days: int, min_channel_messages: int, max_messages_per_channel: int,
+def build_report(settings, days: int, max_messages_per_channel: int,
                  own_user_id: str | None, max_total_sources: int = 260,
                  exclude_mail_noise: bool = True,
                  oldest_ts_override: str | None = None) -> tuple[str, dict]:
@@ -548,8 +481,6 @@ def find_last_report_ts(slack_client: SlackClient, channel: str) -> str | None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate a weekly Slack digest from the bot database.")
     parser.add_argument("--days", type=int, default=7, help="How many days back to include (default 7)")
-    parser.add_argument("--min-channel-messages", type=int, default=4,
-                        help="Channels with at least this many messages get an AI summary; smaller ones are listed raw")
     parser.add_argument("--max-messages-per-channel", type=int, default=80,
                         help="Cap messages per channel fed to the summarizer (most recent kept)")
     parser.add_argument("--keep-mail-noise", action="store_true",
@@ -585,7 +516,6 @@ def main() -> None:
     report, stats = build_report(
         settings,
         days=args.days,
-        min_channel_messages=args.min_channel_messages,
         max_messages_per_channel=args.max_messages_per_channel,
         own_user_id=own_user_id,
         exclude_mail_noise=not args.keep_mail_noise,
