@@ -182,6 +182,96 @@ def string_contains_any(text: str | None, needles: list[str]) -> bool:
     return any(needle.lower() in lowered for needle in needles if needle)
 
 
+_MAILTO_RE = re.compile(r"<mailto:[^|>]+\|([^>]+)>")
+_ANGLE_ADDR_RE = re.compile(r"<([^>|]+@[^>|]+)>")
+_RECIPIENT_RE = re.compile(r"([\w.+-]+@[\w.-]+)\s*宛に")
+
+
+def _clean_addr(value: str | None) -> str | None:
+    if not value:
+        return None
+    match = _MAILTO_RE.search(value) or _ANGLE_ADDR_RE.search(value)
+    if match:
+        return match.group(1).strip()
+    return value.strip(' *"<>【】').strip() or None
+
+
+def _extract_after(text: str, labels: tuple[str, ...]) -> str | None:
+    for label in labels:
+        idx = text.find(label)
+        if idx < 0:
+            continue
+        rest = text[idx + len(label):].lstrip(" *:：\t")
+        end = len(rest)
+        for stop in ("*", "\n", "【"):
+            hit = rest.find(stop)
+            if 0 <= hit < end:
+                end = hit
+        value = rest[:end].strip()
+        if value:
+            return value
+    return None
+
+
+def mail_meta(message: StoredMessage) -> dict[str, str | None] | None:
+    """Best-effort direction/sender/recipient for a forwarded-email bot_message.
+
+    Emails arrive as bot posts whose body carries whether they were received or
+    sent and by/for whom; surfacing that lets the answerer tell an action a person
+    TOOK from mail merely addressed TO them, without hard-coding any per-person rule.
+    """
+    if message.source_type != "bot_message":
+        return None
+    text = message.text or ""
+    markers = ("受信メール", "送信メール", "新着メール", "inbox_tray", "outbox_tray", "送信元")
+    if not any(marker in text for marker in markers):
+        return None
+
+    if "送信メール" in text or "outbox_tray" in text:
+        direction = "送信"
+    elif any(marker in text for marker in ("受信メール", "新着メール", "inbox_tray")):
+        direction = "受信"
+    else:
+        direction = "?"
+
+    sender = _clean_addr(_extract_after(text, ("【送信元】", "送信元")))
+    recipient = _clean_addr(_extract_after(text, ("【宛先】", "宛先")))
+    if not recipient:
+        match = _RECIPIENT_RE.search(text)
+        if match:
+            recipient = match.group(1)
+    return {"direction": direction, "sender": sender, "recipient": recipient}
+
+
+# Inbound automated/promotional mail (headlines, ads, login/OTP notices) pollutes
+# every search that touches a mailbox channel. Down-rank it generally so real
+# business messages win — never removed outright, so a query explicitly about one
+# of these can still surface it on strong keyword/embedding match.
+_NOISE_SENDER_HINTS = (
+    "no-reply", "noreply", "no_reply", "donotreply", "do-not-reply",
+    "@prtimes.jp", "mag@", "mailmag", "newsletter", "magazine",
+)
+_NOISE_SUBJECT_HINTS = (
+    "ヘッドライン", "pr times", "ワンタイムパスワード", "パスワード再設定", "ログイン通知",
+    "順位レポート", "メルマガ", "配信停止", "キャンペーン", "セール", "クーポン",
+    "%off", "％off", "抽選", "お得",
+)
+
+
+def automated_noise_penalty(message: StoredMessage) -> float:
+    """Score penalty for clearly automated/promotional INBOUND mail (0 otherwise)."""
+    meta = mail_meta(message)
+    if not meta or meta.get("direction") == "送信":
+        return 0.0  # never penalize a person's own sent mail
+    text = (message.text or "").lower()
+    sender = (meta.get("sender") or "").lower()
+    if any(hint in sender for hint in _NOISE_SENDER_HINTS):
+        return 0.5
+    if any(hint in text for hint in _NOISE_SUBJECT_HINTS):
+        return 0.5
+    return 0.0
+
+
 def metadata_score(plan: SearchPlan, message: StoredMessage) -> float:
     score = 0.0
     text = message_search_text(message)
@@ -444,7 +534,7 @@ def search_messages(
 
     scored: list[tuple[float, StoredMessage]] = []
     for message in candidates:
-        score = hybrid_score(search_query, message, plan, query_embedding)
+        score = hybrid_score(search_query, message, plan, query_embedding) - automated_noise_penalty(message)
         if score > 0:
             scored.append((score, message))
 
@@ -475,9 +565,19 @@ def format_context(messages: list[StoredMessage], max_chars: int = 26000) -> str
         if len(body) > 2500:
             body = body[:2500] + "\n[message truncated]"
 
+        meta = mail_meta(message)
+        mail_tag = ""
+        if meta:
+            parts = [f"mail={meta['direction']}"]
+            if meta.get("sender"):
+                parts.append(f"from={meta['sender']}")
+            if meta.get("recipient"):
+                parts.append(f"to={meta['recipient']}")
+            mail_tag = " " + " ".join(parts)
+
         entry = (
             f"[{index}] {channel} {user} datetime_jst={message_datetime_jst(message)} "
-            f"ts={message.ts} thread_root={root} source={message.source_type}\n"
+            f"ts={message.ts} thread_root={root} source={message.source_type}{mail_tag}\n"
             f"permalink: {permalink}\n"
             f"{body}"
         )
