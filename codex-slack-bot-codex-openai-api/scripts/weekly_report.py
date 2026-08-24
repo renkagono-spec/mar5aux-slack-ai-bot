@@ -428,6 +428,7 @@ def build_report(settings, days: int, max_messages_per_channel: int,
 
     reduce_input = "\n".join(source_lines)[:48000]
 
+    error: str | None = None
     if not reduce_input.strip():
         body = "今週は目立った決定事項・要フォロー・新規の動きはありませんでした。"
     else:
@@ -436,6 +437,7 @@ def build_report(settings, days: int, max_messages_per_channel: int,
             body = linkify_citations(raw, index_to_message)
         except Exception as exc:  # noqa: BLE001
             body = f"レポート生成に失敗しました: {exc}"
+            error = str(exc)
 
     noise_appendix = format_noise_appendix(excluded_messages)
     if noise_appendix:
@@ -451,6 +453,7 @@ def build_report(settings, days: int, max_messages_per_channel: int,
         "messages": len(messages),
         "sources_used": index,
         "excluded_noise": excluded_noise,
+        "error": error,
     }
     return f"{header}\n{body}", stats
 
@@ -470,7 +473,10 @@ def find_last_report_ts(slack_client: SlackClient, channel: str) -> str | None:
     for _ in range(5):  # up to ~1000 messages back
         response = slack_client.conversation_history(channel=channel, limit=200, cursor=cursor)
         for item in response.get("messages", []):  # newest first
-            if REPORT_HEADER_MARK in (item.get("text") or "")[:80]:
+            text = item.get("text") or ""
+            # Only successful reports mark progress; skip failed-generation posts
+            # so a broken run never becomes the anchor and swallows a week.
+            if REPORT_HEADER_MARK in text[:80] and "レポート生成に失敗" not in text:
                 return item.get("ts")
         cursor = (response.get("response_metadata") or {}).get("next_cursor")
         if not cursor:
@@ -531,6 +537,11 @@ def main() -> None:
         if not args.channel:
             print("\n--post was given but --channel is missing. Nothing posted.")
             return
+        if stats.get("error"):
+            # Never post a broken report: leave Slack clean, exit non-zero so the
+            # failure is visible and the next run resumes from the last good report.
+            print(f"\n生成に失敗したため投稿をスキップしました: {stats['error']}")
+            raise SystemExit(1)
         slack_client.post_message(channel=args.channel, text=report[:39000])
         print(f"\nPosted to channel {args.channel}.")
     else:
