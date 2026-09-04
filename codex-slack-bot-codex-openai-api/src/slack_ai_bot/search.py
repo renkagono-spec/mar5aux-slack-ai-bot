@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
+import html
 import logging
 import math
 import re
@@ -310,10 +311,13 @@ def mail_meta(message: StoredMessage) -> dict[str, str | None] | None:
     else:
         direction = "?"
 
-    sender = _clean_addr(_extract_after(text, ("【送信元】", "送信元")))
-    recipient = _clean_addr(_extract_after(text, ("【宛先】", "宛先")))
+    # Addresses arrive HTML-escaped (&lt;a@b&gt;) and/or mailto-wrapped
+    # (<mailto:a@b|a@b>); normalize before pulling out sender/recipient.
+    parsed = re.sub(r"mailto:[^|>\s]+\|", "", html.unescape(text))
+    sender = _clean_addr(_extract_after(parsed, ("【送信元】", "送信元")))
+    recipient = _clean_addr(_extract_after(parsed, ("【宛先】", "宛先")))
     if not recipient:
-        match = _RECIPIENT_RE.search(text)
+        match = _RECIPIENT_RE.search(parsed)
         if match:
             recipient = match.group(1)
     return {"direction": direction, "sender": sender, "recipient": recipient}

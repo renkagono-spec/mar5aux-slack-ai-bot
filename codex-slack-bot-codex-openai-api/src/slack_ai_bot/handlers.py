@@ -4,6 +4,7 @@ import logging
 import re
 from typing import Any
 
+from .aggregate import run_email_aggregate
 from .config import Settings
 from .openai_client import OpenAIClient
 from .search import format_context, search_messages, today_jst
@@ -589,6 +590,21 @@ def handle_app_mention(
             event.get("ts"),
             openai_client,
         )
+
+        # Count/enumerate questions ("how many emails did X send / to whom") cannot
+        # be answered by top-K retrieval (it only sees ~12 messages); answer them by
+        # aggregating the whole DB deterministically instead.
+        try:
+            aggregate_answer = run_email_aggregate(
+                effective_question, storage, openai_client, asker_name=asker_name
+            )
+        except Exception:
+            logging.exception("email aggregate failed")
+            aggregate_answer = None
+        if aggregate_answer:
+            respond(aggregate_answer)
+            return
+
         excluded_mention_ids = {mention_id for mention_id in [slack_client.own_user_id()] if mention_id}
 
         matches = search_messages(
