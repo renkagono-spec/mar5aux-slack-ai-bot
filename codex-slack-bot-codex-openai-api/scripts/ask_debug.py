@@ -130,6 +130,8 @@ def main() -> None:
     parser.add_argument("--thread-ts", help="Slack thread root ts for follow-up/memory debugging")
     parser.add_argument("--current-ts", help="Current message ts. Used to ignore messages after this point in thread memory.")
     parser.add_argument("--live-thread", action="store_true", help="Fetch the thread from Slack before resolving the question")
+    parser.add_argument("--asker-name", help="Display name of the person asking (resolves 私/自分 for task questions)")
+    parser.add_argument("--asker-id", help="Slack user id of the person asking (boosts @mentions to them)")
     parser.add_argument("--answer", action="store_true", help="Also call OpenAI to generate the final answer")
     parser.add_argument("--show-context", action="store_true", help="Print the full formatted context sent to OpenAI")
     parser.add_argument("--match-limit", type=int, default=20, help="Maximum matched messages to print")
@@ -191,6 +193,8 @@ def main() -> None:
         thread_ts=args.thread_ts if not inherited else None,
         current_ts=current_ts if not inherited else None,
         excluded_mention_ids={item for item in excluded_mention_ids if item},
+        asker_id=args.asker_id,
+        asker_name=args.asker_name,
     )
     print_matches(matches, args.match_limit)
 
@@ -203,7 +207,7 @@ def main() -> None:
     if args.answer:
         print("")
         print("answer:")
-        print(openai_client.answer_question(effective_question, context))
+        print(openai_client.answer_question(effective_question, context, asker_name=args.asker_name))
 
 
 if __name__ == "__main__":

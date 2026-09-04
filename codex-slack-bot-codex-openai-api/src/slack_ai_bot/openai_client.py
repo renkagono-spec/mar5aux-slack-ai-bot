@@ -180,7 +180,7 @@ class OpenAIClient:
             "reason": "resolver_fallback",
         }
 
-    def answer_question(self, question: str, context: str) -> str:
+    def answer_question(self, question: str, context: str, asker_name: str | None = None) -> str:
         instructions = (
             "Answer in Japanese. You are an internal Slack search assistant that answers ONLY from the supplied "
             "Context messages. Be concise and specific.\n\n"
@@ -207,6 +207,15 @@ class OpenAIClient:
             "受信 mail merely addressed to them as their action (that is the sender's action). If asked what a person RECEIVED "
             "or was contacted about, use their 受信 mail. A channel named after a person is that person's mailbox, not proof "
             "they acted.\n\n"
+            "TASKS / TO-DO QUESTIONS (「私のタスク」「未対応」「やること」など、ある人がまだ対応すべきことを尋ねる質問):\n"
+            "- The asker's name is given as asker= in the input when known; first-person words (私/自分/僕/my) refer to that "
+            "person. Answer about THAT person's open tasks.\n"
+            "- A task is something that person still needs to act on. Include: (a) requests/assignments directed TO them — "
+            "someone @-mentions them asking for something, or an inbound mail addressed to them that asks for an action; and "
+            "(b) their own unfinished notes/memos/reminders. For each, say who requested it and when, with [n].\n"
+            "- Do NOT list things they already completed, pure FYI/notifications, automated mail, or messages that are only "
+            "status updates with no pending action. If a request clearly has a later reply showing it was handled, omit it.\n"
+            "- Group by who asked (自分メモ / 誰々からの依頼) when it helps. If nothing qualifies, say so plainly.\n\n"
             "ANSWER STYLE:\n"
             "- Lead with the direct answer; put the key value (when / where / who / what / how much) in the first sentence.\n"
             "- For progress or status questions, give a short chronological list of the concrete updates found, each with its "
@@ -217,7 +226,8 @@ class OpenAIClient:
             "question. Do NOT answer not-found merely because the wording differs from the question — if relevant messages "
             "exist, answer from them."
         )
-        user_input = f"Question:\n{question}\n\nContext:\n{context}"
+        asker_line = f"asker={asker_name}\n" if asker_name else ""
+        user_input = f"{asker_line}Question:\n{question}\n\nContext:\n{context}"
 
         payload: dict[str, Any] = {
             "model": self.settings.openai_answer_model,

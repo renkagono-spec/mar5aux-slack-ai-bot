@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
+import hashlib
 import logging
 import math
 import re
@@ -146,6 +147,50 @@ def build_search_query(question: str, plan: SearchPlan) -> str:
     return "\n".join(parts)
 
 
+# A "task/to-do" question ("私の未タスク", "やること", "未対応") is not answered by
+# matching the word タスク — real tasks are phrased as requests to a person or as
+# self-notes. Detect the intent so retrieval can be steered toward obligations.
+_TASK_INTENT_RE = re.compile(
+    r"タスク|to\s*-?\s*do|todo|やること|やらな|やり残|やるべき|残っ(て|た)|"
+    r"未対応|未完了|未着手|未処理|抜け|漏れ|宿題|対応(待ち|漏れ|すべき)|依頼(され|きて|ある|が)",
+    re.IGNORECASE,
+)
+# First person ("私/自分/僕/俺/my") means the subject IS the person asking.
+_FIRST_PERSON_RE = re.compile(r"私|わたし|わたくし|僕|ぼく|俺|おれ|自分|自身|マイ|\bmy\b|\bme\b", re.IGNORECASE)
+# Obligation / commitment language that actually appears in task-like messages.
+_TASK_KEYWORDS = (
+    "お願いします", "お願いいたします", "してください", "してほしい", "いただけますか",
+    "依頼", "対応", "未対応", "確認お願い", "まだですか", "期限", "締切", "メモ", "todo", "やること",
+)
+
+
+def is_task_intent(question: str) -> bool:
+    return bool(_TASK_INTENT_RE.search(question or ""))
+
+
+def has_first_person(question: str) -> bool:
+    return bool(_FIRST_PERSON_RE.search(question or ""))
+
+
+def enrich_plan_for_tasks(plan: SearchPlan, question: str, asker_name: str | None) -> SearchPlan:
+    """For a task question, resolve the asker as the subject (A) and add obligation
+    keywords (B) so retrieval looks for requests/notes, not the literal word タスク.
+
+    The asker is only added when the planner did not already name a specific person,
+    so an explicit "坪井のタスク" is never overwritten with the person who asked.
+    """
+    if not is_task_intent(question):
+        return plan
+    person_names = list(plan.person_names)
+    if asker_name and not person_names and has_first_person(question):
+        person_names.append(asker_name)
+    keywords = list(plan.keywords)
+    for extra in _TASK_KEYWORDS:
+        if extra not in keywords:
+            keywords.append(extra)
+    return replace(plan, person_names=person_names, keywords=keywords)
+
+
 def search_terms(question: str, plan: SearchPlan) -> list[str]:
     terms: list[str] = []
     terms.extend(plan.keywords)
@@ -162,6 +207,37 @@ def search_terms(question: str, plan: SearchPlan) -> list[str]:
         seen.add(value)
         cleaned.append(value)
     return cleaned
+
+
+def _dedup_signature(message: StoredMessage) -> str | None:
+    """Signature for collapsing duplicate forwarded emails.
+
+    The mail→Slack forwarder mirrors one email into several mailbox channels and
+    sometimes re-posts it in bursts; those copies are byte-identical, so a
+    normalized full-text hash collapses them while keeping genuinely different
+    emails (different bodies) apart. Only emails (bot_message) are deduped, so two
+    distinct human messages that happen to share short text are never merged.
+    """
+    if message.source_type != "bot_message":
+        return None
+    normalized = " ".join((message.text or "").split())
+    if not normalized:
+        return None
+    return hashlib.md5(normalized.encode("utf-8")).hexdigest()
+
+
+def dedupe_messages(messages: list[StoredMessage]) -> list[StoredMessage]:
+    """Drop duplicate forwarded emails, keeping the first occurrence."""
+    seen: set[str] = set()
+    out: list[StoredMessage] = []
+    for message in messages:
+        signature = _dedup_signature(message)
+        if signature is not None:
+            if signature in seen:
+                continue
+            seen.add(signature)
+        out.append(message)
+    return out
 
 
 def merge_messages(groups: list[list[StoredMessage]]) -> list[StoredMessage]:
@@ -270,6 +346,29 @@ def automated_noise_penalty(message: StoredMessage) -> float:
     if any(hint in text for hint in _NOISE_SUBJECT_HINTS):
         return 0.5
     return 0.0
+
+
+def asker_task_bonus(
+    message: StoredMessage,
+    asker_id: str | None,
+    asker_name: str | None,
+) -> float:
+    """Boost messages that represent a task FOR the asker: someone @-mentioned them
+    (a request/assignment), a mail addressed to them, or a self-note they wrote.
+
+    Applied only for task-intent questions, so normal questions are unaffected.
+    """
+    bonus = 0.0
+    text = message.text or ""
+    if asker_id and f"<@{asker_id}>" in text:
+        bonus += 0.35  # someone tagged the asker → very likely a request to them
+    meta = mail_meta(message)
+    if meta and asker_name and meta.get("recipient") and asker_name.lower() in (meta["recipient"] or "").lower():
+        bonus += 0.2  # inbound mail addressed to the asker
+    if asker_name and message.user_name and asker_name.lower() in message.user_name.lower():
+        if any(marker in text for marker in ("メモ", "TODO", "todo", "やること", "やらな", "忘れ", "後で")):
+            bonus += 0.15  # the asker's own to-do note
+    return bonus
 
 
 def metadata_score(plan: SearchPlan, message: StoredMessage) -> float:
@@ -479,6 +578,8 @@ def search_messages(
     thread_ts: str | None = None,
     current_ts: str | None = None,
     excluded_mention_ids: set[str] | None = None,
+    asker_id: str | None = None,
+    asker_name: str | None = None,
 ) -> list[StoredMessage]:
     linked_message = parse_slack_message_link(question)
     if linked_message:
@@ -503,6 +604,8 @@ def search_messages(
         return exclude_mentioned_messages(thread_memory, excluded_mention_ids)
 
     plan = plan_search(question, openai_client)
+    plan = enrich_plan_for_tasks(plan, question, asker_name)
+    task_intent = is_task_intent(question)
     recent_candidates = storage.list_messages(
         workspace_id=workspace_id,
         channel_id=channel_id,
@@ -521,6 +624,7 @@ def search_messages(
         latest_ts=plan.latest_ts if plan.date_intent else None,
     )
     candidates = merge_messages([term_candidates, recent_candidates])
+    candidates = dedupe_messages(candidates)
     candidates = exclude_mentioned_messages(candidates, excluded_mention_ids)
     if not candidates:
         return []
@@ -535,6 +639,8 @@ def search_messages(
     scored: list[tuple[float, StoredMessage]] = []
     for message in candidates:
         score = hybrid_score(search_query, message, plan, query_embedding) - automated_noise_penalty(message)
+        if task_intent:
+            score += asker_task_bonus(message, asker_id, asker_name)
         if score > 0:
             scored.append((score, message))
 
@@ -546,7 +652,8 @@ def search_messages(
     else:
         hits = []
 
-    return expand_context_messages(hits, storage, settings, plan, excluded_mention_ids=excluded_mention_ids)
+    expanded = expand_context_messages(hits, storage, settings, plan, excluded_mention_ids=excluded_mention_ids)
+    return dedupe_messages(expanded)
 
 
 def format_context(messages: list[StoredMessage], max_chars: int = 26000) -> str:

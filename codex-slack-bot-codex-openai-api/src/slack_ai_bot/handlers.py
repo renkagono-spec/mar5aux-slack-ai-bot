@@ -545,6 +545,8 @@ def handle_app_mention(
 
     question = clean_question(event.get("text", ""))
     workspace_id = workspace_id_from_payload(payload, event)
+    asker_id = event.get("user")
+    asker_name = slack_client.user_name(asker_id) if asker_id else None
     # The 👀 reaction is the only "working" indicator; the answer is posted when
     # ready. (No placeholder message — the user found it noisy.)
     slack_client.add_reaction(channel_id, event["ts"], "eyes")
@@ -599,6 +601,8 @@ def handle_app_mention(
             thread_ts=event.get("thread_ts") if not inherited_question else None,
             current_ts=event.get("ts") if not inherited_question else None,
             excluded_mention_ids=excluded_mention_ids,
+            asker_id=asker_id,
+            asker_name=asker_name,
         )
 
         if not matches and inherited_question and current_thread_messages:
@@ -612,6 +616,7 @@ def handle_app_mention(
             answer = openai_client.answer_question(
                 answer_question_text_for_thread_memory(effective_question),
                 context,
+                asker_name=asker_name,
             )
             answer_with_links = answer.rstrip() + format_evidence_links(answer, thread_context_messages)
             respond(answer_with_links)
@@ -639,7 +644,7 @@ def handle_app_mention(
                 "The latest Slack reply was only a short follow-up. "
                 "Answer the request above directly. Do not summarize the follow-up or the request itself."
             )
-        answer = openai_client.answer_question(answer_question_text, context)
+        answer = openai_client.answer_question(answer_question_text, context, asker_name=asker_name)
         answer_with_links = answer.rstrip() + format_evidence_links(answer, matches)
         respond(answer_with_links)
     except Exception:
