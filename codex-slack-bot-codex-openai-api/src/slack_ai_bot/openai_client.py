@@ -180,6 +180,28 @@ class OpenAIClient:
             "reason": "resolver_fallback",
         }
 
+    def complete_text(self, instructions: str, input_text: str, timeout: int = 90) -> str:
+        """Generic single completion — used by the agent loop for each reasoning step."""
+        response = post_json(
+            "https://api.openai.com/v1/responses",
+            {
+                "model": self.settings.openai_answer_model,
+                "instructions": instructions,
+                "input": input_text,
+                "temperature": 0,
+            },
+            headers=self.headers,
+            timeout=timeout,
+        )
+        if response.get("output_text"):
+            return response["output_text"].strip()
+        chunks: list[str] = []
+        for item in response.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") == "output_text" and content.get("text"):
+                    chunks.append(content["text"])
+        return "\n".join(chunks).strip()
+
     def answer_question(self, question: str, context: str, asker_name: str | None = None) -> str:
         instructions = (
             "Answer in Japanese. You are an internal Slack search assistant that answers ONLY from the supplied "

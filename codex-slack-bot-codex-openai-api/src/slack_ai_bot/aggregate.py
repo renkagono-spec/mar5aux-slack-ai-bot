@@ -124,6 +124,115 @@ class _Row:
         self.source_type = "bot_message"
 
 
+def _date_to_ts(date_str: str | None) -> float | None:
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str.strip(), "%Y-%m-%d").replace(tzinfo=JST).timestamp()
+    except ValueError:
+        return None
+
+
+def query_emails(
+    storage: Storage,
+    *,
+    person: str = "",
+    direction: str = "any",
+    counterpart: str = "",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    mode: str = "count",
+    asker_name: str | None = None,
+) -> str:
+    """Deterministic count/list of forwarded emails over the whole (deduped) DB.
+
+    A tool the agent calls with explicit parameters — the agent decides person /
+    direction / counterpart / period / mode, this just executes and reports.
+    `person` is an internal person (name/handle/address); `counterpart` filters the
+    other party (name/domain/address substring). direction: sent|received|any.
+    mode: count (totals + by-counterpart) | list (each mail with a body snippet).
+    """
+    person = (person or "").strip()
+    if person.lower() in ("me", "私", "自分", "僕", "俺", "わたし") and asker_name:
+        person = asker_name
+    addresses = resolve_addresses_for_person(person, storage) if person else set()
+    addr_low = {a.lower() for a in addresses}
+    if person and not addresses:
+        return (f"『{person}』の社用メールアドレスをデータから特定できませんでした。"
+                f"相手先の会社/ドメインが分かる場合は counterpart で指定してください。")
+
+    oldest = _date_to_ts(start_date)
+    latest = _date_to_ts(end_date)
+    rows = _fetch_emails(storage, str(oldest) if oldest else None, str(latest) if latest else None)
+    deduped = dedupe_messages([_Row(d) for d in rows])
+
+    dir_map = {"sent": "送信", "received": "受信"}
+    want_dir = dir_map.get(direction)
+    cp_low = (counterpart or "").lower().strip()
+
+    matched = []
+    for m in deduped:
+        meta = mail_meta(m)
+        if not meta:
+            continue
+        d = meta.get("direction")
+        if want_dir and d != want_dir:
+            continue
+        if d not in ("送信", "受信"):
+            continue
+        sender = (meta.get("sender") or "").lower()
+        recipient = (meta.get("recipient") or "").lower()
+        if addr_low:
+            if d == "送信" and not any(a in sender for a in addr_low):
+                continue
+            if d == "受信" and not any(a in recipient for a in addr_low):
+                continue
+        uptext = html.unescape(m.text or "")
+        # counterpart's raw header line (display name + address), so a filter like
+        # "tanakaseni" or "田中" matches even though mail_meta only keeps the address.
+        raw_cp = (_extract_after(uptext, ("【宛先】", "宛先")) if d == "送信"
+                  else _extract_after(uptext, ("【送信元】", "送信元")))
+        raw_cp = raw_cp or (meta.get("recipient") if d == "送信" else meta.get("sender")) or ""
+        if cp_low and cp_low not in raw_cp.lower() and cp_low not in uptext.lower():
+            continue  # match the header line, or fall back to the body (e.g. a signature)
+        addr = _ADDR.findall(raw_cp)
+        matched.append({
+            "ts": m.ts,
+            "when": datetime.fromtimestamp(float(m.ts), JST).strftime("%m/%d %H:%M"),
+            "counterpart": addr[0] if addr else raw_cp.strip('" <>（）')[:40],
+            "subject": " ".join((_extract_after(uptext, ("【件名】", "件名")) or "").split())[:80],
+            "snippet": _body_snippet(m.text or ""),
+        })
+
+    total = len(matched)
+    scope = []
+    if person:
+        scope.append(f"{person}（{'/'.join(sorted(addresses))}）" if addresses else person)
+    scope.append({"sent": "送信", "received": "受信"}.get(direction, "送受信"))
+    if counterpart:
+        scope.append(f"相手={counterpart}")
+    if start_date or end_date:
+        scope.append(f"期間 {start_date or '〜'}〜{end_date or ''}（終端含まず）")
+    header = " / ".join(scope)
+
+    by_cp = Counter(it["counterpart"] for it in matched)
+    label = "差出人" if direction == "received" else "宛先"
+
+    if mode == "list":
+        lines = [f"[{header}] 該当 {total}件（重複除去後）",
+                 f"{label}別: " + "、".join(f"{cp} {n}件" for cp, n in by_cp.most_common()), ""]
+        for i, it in enumerate(sorted(matched, key=lambda x: float(x["ts"])), 1):
+            lines.append(f"{i}. {it['when']} → {it['counterpart']} ｜ 件名: {it['subject'] or '(なし)'}")
+            if it["snippet"]:
+                lines.append(f"    {it['snippet']}")
+        return "\n".join(lines)
+
+    lines = [f"[{header}] 合計 {total}件（重複除去後）", f"{label}別:"]
+    for cp, n in by_cp.most_common():
+        lines.append(f"  {cp}: {n}件")
+    return "\n".join(lines)
+
+
 def run_email_aggregate(
     question: str,
     storage: Storage,

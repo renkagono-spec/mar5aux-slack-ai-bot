@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Any
 
-from .aggregate import run_email_aggregate
+from .agent import answer_with_agent
 from .config import Settings
 from .openai_client import OpenAIClient
 from .search import format_context, search_messages, today_jst
@@ -591,21 +591,29 @@ def handle_app_mention(
             openai_client,
         )
 
-        # Count/enumerate questions ("how many emails did X send / to whom") cannot
-        # be answered by top-K retrieval (it only sees ~12 messages); answer them by
-        # aggregating the whole DB deterministically instead.
+        excluded_mention_ids = {mention_id for mention_id in [slack_client.own_user_id()] if mention_id}
+
+        # Primary path: an agent that uses tools (semantic search + email count/list)
+        # and iterates before answering, so counts, listings and content questions all
+        # work. Falls through to the legacy single-shot path only if it errors/empties.
         try:
-            aggregate_answer = run_email_aggregate(
-                effective_question, storage, openai_client, asker_name=asker_name
+            agent_answer, agent_sources = answer_with_agent(
+                effective_question,
+                storage=storage,
+                openai_client=openai_client,
+                settings=settings,
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                asker_id=asker_id,
+                asker_name=asker_name,
+                excluded_mention_ids=excluded_mention_ids,
             )
         except Exception:
-            logging.exception("email aggregate failed")
-            aggregate_answer = None
-        if aggregate_answer:
-            respond(aggregate_answer)
+            logging.exception("agent path failed; falling back to retrieval")
+            agent_answer, agent_sources = "", []
+        if agent_answer:
+            respond(agent_answer.rstrip() + format_evidence_links(agent_answer, agent_sources))
             return
-
-        excluded_mention_ids = {mention_id for mention_id in [slack_client.own_user_id()] if mention_id}
 
         matches = search_messages(
             question=effective_question,
