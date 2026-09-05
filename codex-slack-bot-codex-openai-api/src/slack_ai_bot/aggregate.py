@@ -17,12 +17,14 @@ from datetime import datetime
 
 from .config import Settings
 from .openai_client import OpenAIClient
-from .search import JST, dedupe_messages, mail_meta, plan_search
+from .search import JST, _extract_after, dedupe_messages, mail_meta, plan_search
 from .storage import Storage, StoredMessage
 
 _AGG_INTENT = re.compile(
     r"何件|何通|いくつ|件数|回数|合計|総数|一覧|リスト|全部|全て|すべて|どこ(に|宛|へ)|どちら"
 )
+# Enumerate ("list each / their contents") — often a follow-up to a count answer.
+_ENUM_INTENT = re.compile(r"それぞれ|各(メール|件|通|社)?|一覧|リスト|全部|全て|すべて|中身|内容|明細|\d+\s*件")
 _MAIL_WORD = re.compile(r"メール|送っ|送信|受信|届い|やり取り|やりとり|返信|出し")
 _ADDR = re.compile(r"[\w.+-]+@[\w.-]+")
 _SENT = re.compile(r"送(っ|信|る|り)|出し|出す")
@@ -32,7 +34,22 @@ _HEADER_PAIR = re.compile(r'"?([^"<>\n]{1,30})"?\s*[<＜(]\s*([\w.+-]+@[\w.-]+)'
 
 def is_email_aggregate(question: str) -> bool:
     q = question or ""
-    return bool(_AGG_INTENT.search(q) and _MAIL_WORD.search(q))
+    return bool((_AGG_INTENT.search(q) or _ENUM_INTENT.search(q)) and _MAIL_WORD.search(q))
+
+
+def wants_contents(question: str) -> bool:
+    """True when the asker wants each email listed (not just a count)."""
+    return bool(_ENUM_INTENT.search(question or ""))
+
+
+def _body_snippet(text: str, limit: int = 160) -> str:
+    body = html.unescape(text or "")
+    marker = re.search(r"(本文|内容)\s*[:：]?\s*\*?", body)
+    if marker:
+        body = body[marker.end():]
+    body = body.replace("```", " ")
+    body = " ".join(body.split())
+    return body[:limit] + ("…" if len(body) > limit else "")
 
 
 def _direction(question: str) -> str | None:
@@ -158,16 +175,35 @@ def run_email_aggregate(
         else:
             continue
         cp = _ADDR.findall(counterpart)
-        matched.append((m.ts, cp[0] if cp else counterpart.strip('" <>（）')))
+        subject = " ".join((_extract_after(html.unescape(m.text or ""), ("【件名】", "件名")) or "").split())[:80]
+        matched.append({
+            "ts": m.ts,
+            "when": datetime.fromtimestamp(float(m.ts), JST).strftime("%m/%d %H:%M"),
+            "counterpart": cp[0] if cp else counterpart.strip('" <>（）'),
+            "subject": subject,
+            "snippet": _body_snippet(m.text or ""),
+        })
 
     total = len(matched)
-    by_cp = Counter(cp for _, cp in matched)
     period = ""
     if plan.date_intent and plan.start_date and plan.end_date:
         period = f"{plan.start_date}〜{plan.end_date}（終端は含まず）の"
-
     dir_word = {"送信": "送信した", "受信": "受信した"}.get(direction, "やり取りした")
     who = person if not addresses else f"{person}（{'/'.join(sorted(addresses))}）"
+
+    if wants_contents(question):
+        lines = [f"{period}{who} が{dir_word}メール（重複除去後 *{total}件*）の内容は以下です。"]
+        for i, item in enumerate(sorted(matched, key=lambda x: float(x["ts"])), 1):
+            head = f"\n*{i}. {item['when']} → {item['counterpart']}*"
+            if item["subject"]:
+                head += f"\n件名: {item['subject']}"
+            if item["snippet"]:
+                head += f"\n{item['snippet']}"
+            lines.append(head)
+        lines.append("\n（ミラー／連投の重複は除いています。本文は各メールの冒頭抜粋です）")
+        return "\n".join(lines)
+
+    by_cp = Counter(item["counterpart"] for item in matched)
     lines = [f"{period}{who} が{dir_word}メールは、重複除去後 *{total}件* です。"]
     if by_cp:
         label = "宛先" if direction != "受信" else "差出人"
