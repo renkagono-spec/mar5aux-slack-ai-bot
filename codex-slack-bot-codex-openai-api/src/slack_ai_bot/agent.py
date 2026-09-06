@@ -135,6 +135,7 @@ def answer_with_agent(
     last_answer = ""
     last_email_output: str | None = None  # deterministic email count/list to return verbatim
     last_tool = ""
+    email_refs: list[str] = []  # permalinks seen in query_emails output, for summary answers
 
     for step in range(MAX_STEPS):
         force_final = step == MAX_STEPS - 1
@@ -159,12 +160,22 @@ def answer_with_agent(
             # instead of a raw email dump.
             if last_tool == "email_count" and last_email_output:
                 return last_email_output, sources
-            return str(action.get("answer") or "").strip(), sources
+            ans = str(action.get("answer") or "").strip()
+            # A summary built from a query_emails list carries no [n]/sources, so
+            # attach the emails' own permalinks the way count answers do.
+            if email_refs and not sources:
+                ans += "\n\n参照リンク:\n" + "\n".join(
+                    f"{i}. <{url}|開く>" for i, url in enumerate(email_refs[:6], 1)
+                )
+            return ans, sources
         if kind == "search":
             obs = tool_search(str(action.get("query", "") or question))
             last_tool = "search"
         elif kind == "query_emails":
             obs = tool_query_emails(action)
+            for url in re.findall(r"<(https?://[^|>]+)\|", obs):
+                if url not in email_refs:
+                    email_refs.append(url)
             if str(action.get("mode", "count")) == "count":
                 last_email_output = obs
                 last_tool = "email_count"
