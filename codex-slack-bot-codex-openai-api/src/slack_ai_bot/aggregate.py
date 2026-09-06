@@ -111,7 +111,7 @@ def _fetch_emails(storage: Storage, oldest_ts: str | None, latest_ts: str | None
     if latest_ts:
         clauses.append("ts::double precision < %s")
         params.append(float(latest_ts))
-    sql = "SELECT ts, channel_name, text FROM messages WHERE " + " AND ".join(clauses)
+    sql = "SELECT ts, channel_name, text, permalink FROM messages WHERE " + " AND ".join(clauses)
     with storage.connect() as conn:
         return [dict(r) for r in conn.execute(sql, tuple(params)).fetchall()]
 
@@ -121,6 +121,7 @@ class _Row:
         self.ts = d["ts"]
         self.channel_name = d["channel_name"]
         self.text = d["text"]
+        self.permalink = d.get("permalink")
         self.source_type = "bot_message"
 
 
@@ -202,6 +203,7 @@ def query_emails(
             "counterpart": addr[0] if addr else raw_cp.strip('" <>（）')[:40],
             "subject": " ".join((_extract_after(uptext, ("【件名】", "件名")) or "").split())[:80],
             "snippet": _body_snippet(m.text or ""),
+            "permalink": getattr(m, "permalink", None),
         })
 
     total = len(matched)
@@ -222,7 +224,8 @@ def query_emails(
         lines = [f"[{header}] 該当 {total}件（重複除去後）",
                  f"{label}別: " + "、".join(f"{cp} {n}件" for cp, n in by_cp.most_common()), ""]
         for i, it in enumerate(sorted(matched, key=lambda x: float(x["ts"])), 1):
-            lines.append(f"{i}. {it['when']} → {it['counterpart']} ｜ 件名: {it['subject'] or '(なし)'}")
+            link = f"  <{it['permalink']}|開く>" if it.get("permalink") else ""
+            lines.append(f"{i}. {it['when']} → {it['counterpart']} ｜ 件名: {it['subject'] or '(なし)'}{link}")
             if it["snippet"]:
                 lines.append(f"    {it['snippet']}")
         return "\n".join(lines)
@@ -230,6 +233,19 @@ def query_emails(
     lines = [f"[{header}] 合計 {total}件（重複除去後）", f"{label}別:"]
     for cp, n in by_cp.most_common():
         lines.append(f"  {cp}: {n}件")
+    # Reference links: one representative message per counterpart (up to 6).
+    refs = []
+    seen_cp: set[str] = set()
+    for it in sorted(matched, key=lambda x: float(x["ts"])):
+        if it["counterpart"] in seen_cp or not it.get("permalink"):
+            continue
+        seen_cp.add(it["counterpart"])
+        refs.append(f"<{it['permalink']}|{it['when']} {it['counterpart']}>")
+        if len(refs) >= 6:
+            break
+    if refs:
+        lines.append("\n参照リンク:")
+        lines.extend(f"{i}. {r}" for i, r in enumerate(refs, 1))
     return "\n".join(lines)
 
 
