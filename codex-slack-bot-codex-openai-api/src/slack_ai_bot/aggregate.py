@@ -43,10 +43,13 @@ def wants_contents(question: str) -> bool:
 
 
 def _body_snippet(text: str, limit: int = 160) -> str:
-    body = html.unescape(text or "")
+    body = re.sub(r"mailto:[^|>\s]+\|", "", html.unescape(text or ""))
     marker = re.search(r"(本文|内容)\s*[:：]?\s*\*?", body)
     if marker:
         body = body[marker.end():]
+    else:  # strip the "…宛に新着メールがありました" wrapper and rule lines
+        body = re.sub(r"^.*?新着メールがありました\*?", "", body, flags=re.S)
+        body = re.sub(r"-{3,}", " ", body)
     body = body.replace("```", " ")
     body = " ".join(body.split())
     return body[:limit] + ("…" if len(body) > limit else "")

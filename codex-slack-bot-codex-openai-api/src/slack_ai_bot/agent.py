@@ -40,16 +40,17 @@ _INSTRUCTIONS = (
     "『何件/合計/一覧/どこ宛て/誰から/それぞれの内容』は必ずこれを使う。"
     "person は調べたい社内の人（未指定可）、counterpart は相手先で絞る時に使う。"
     "end_date は含まないので、その月末までなら翌月1日を入れる。mode=list で各メールの中身も出る。\n\n"
-    "進め方:\n"
-    "- 件数・列挙の質問は search で数えようとせず query_emails を使う。\n"
-    "- 内容を問われたら mode=list。足りなければ別のツールをもう一度呼ぶ。\n"
-    "- 事実には search 結果の [n] を付ける。推測で数や日付を作らない。\n"
-    "- 【最重要】query_emails が返した件数・内訳の数字は *一字一句そのまま* 使う。"
-    "合算・四捨五入・省略・並べ替えをしない（例: 内訳の行を1つでも落とさない）。\n"
-    "- 相手先で絞る時、counterpart はメールのドメインやアドレスの一部（例: tanakaseni, kawashima, resourceful）"
-    "や表示名の姓（例: 田中）で指定すると当たりやすい。日本語の会社名しか分からない時は、"
-    "まず counterpart 無しで direction 指定の内訳(by 相手)を取り、その中の該当ドメインの件数を読み取る。\n"
-    "- 十分な材料が集まったら final で簡潔かつ具体的に答える。"
+    "進め方（質問の種類でツールと direction を選ぶ）:\n"
+    "- 『何件/合計/内訳/どこ宛て/誰から』= query_emails mode=count。宛先別も1回で出るので list で自分では数えない。\n"
+    "- 『やったこと/対応した事/実績/動き/進めた事』= その人が“能動的にした事”。"
+    "query_emails は direction=sent（本人の送信メール）を使い、必要なら search で本人のSlack投稿も見る。"
+    "受信メール（PR TIMES・広告・通知・自動配信など）は本人の行為ではないので、列挙にも要約にも含めない。\n"
+    "- 『内容/それぞれ/一覧』= query_emails mode=list。ただし観測(メール群)を *そのまま貼らない*。"
+    "要点を日本語の箇条書きに要約する（相手・日付・要件を1〜2行で）。ノイズ(広告/通知)は省く。\n"
+    "- 『どうなってる/なぜ/経緯/状況』など内容系 = search。事実には [n] を付ける。\n"
+    "- 数の集計は query_emails(count) の数字だけを使い、自分で数え直さない。日付・数を推測で作らない。\n"
+    "- counterpart は相手のドメイン/アドレスの一部（tanakaseni, kawashima, resourceful）や表示名の姓（田中）で指定すると当たりやすい。\n"
+    "- 箇条書き指定なら箇条書きで。十分な材料が集まったら final で簡潔かつ具体的に答える。"
 )
 
 
@@ -152,10 +153,11 @@ def answer_with_agent(
             continue
         kind = action.get("action")
         if kind == "final":
-            # Email counts/lists must be exact. mini composes prose faithfully but
-            # miscounts when it aggregates a list itself, so when the last step was
-            # an email query, return that deterministic output verbatim.
-            if last_tool == "email" and last_email_output:
+            # Only COUNT results are returned verbatim (mini miscounts when it
+            # aggregates a list itself). Lists/summaries are composed by the model
+            # from the observation, so "what did X do" becomes a real summary
+            # instead of a raw email dump.
+            if last_tool == "email_count" and last_email_output:
                 return last_email_output, sources
             return str(action.get("answer") or "").strip(), sources
         if kind == "search":
@@ -163,11 +165,14 @@ def answer_with_agent(
             last_tool = "search"
         elif kind == "query_emails":
             obs = tool_query_emails(action)
-            last_email_output = obs
-            last_tool = "email"
+            if str(action.get("mode", "count")) == "count":
+                last_email_output = obs
+                last_tool = "email_count"
+            else:
+                last_tool = "email_list"
         else:
             obs = f"(未知のaction: {kind})"
-        transcript += f"\n\n実行: {json.dumps(action, ensure_ascii=False)}\n観測:\n{obs[:2800]}"
+        transcript += f"\n\n実行: {json.dumps(action, ensure_ascii=False)}\n観測:\n{obs[:6000]}"
 
     # ran out of steps without a final -> ask once more for a plain answer
     try:
