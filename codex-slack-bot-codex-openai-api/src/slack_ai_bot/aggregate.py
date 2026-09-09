@@ -252,6 +252,61 @@ def query_emails(
     return "\n".join(lines)
 
 
+def grep_messages(
+    storage: Storage,
+    keywords: list[str],
+    *,
+    mode: str = "or",
+    channel: str = "",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    include_mail: bool = False,
+    limit: int = 30,
+) -> str:
+    """Exhaustive keyword scan over the WHOLE DB (not top-K), so the agent can
+    confirm whether something was ever discussed and get the true match count.
+
+    Complements semantic `search`: use this for exact words/phrases, rare terms,
+    and existence checks. Human messages only by default (set include_mail for
+    forwarded email too).
+    """
+    kws = [k.strip() for k in keywords if k and k.strip()][:8]
+    if not kws:
+        return "(キーワードが空です)"
+    joiner = " AND " if mode == "and" else " OR "
+    clauses = ["is_deleted=FALSE", "(" + joiner.join(["text LIKE %s"] * len(kws)) + ")"]
+    params: list = [f"%{k}%" for k in kws]
+    if not include_mail:
+        clauses.append("source_type <> 'bot_message'")
+    if channel:
+        clauses.append("channel_name LIKE %s")
+        params.append(f"%{channel}%")
+    oldest, latest = _date_to_ts(start_date), _date_to_ts(end_date)
+    if oldest:
+        clauses.append("ts::double precision >= %s")
+        params.append(oldest)
+    if latest:
+        clauses.append("ts::double precision < %s")
+        params.append(latest)
+    where = " AND ".join(clauses)
+    with storage.connect() as conn:
+        total = dict(conn.execute(f"SELECT COUNT(*) n FROM messages WHERE {where}", tuple(params)).fetchone())["n"]
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT ts, channel_name, user_name, text, permalink FROM messages WHERE {where} "
+            f"ORDER BY ts::double precision DESC LIMIT {int(limit)}", tuple(params)).fetchall()]
+
+    joined = ("」AND「" if mode == "and" else "」OR「").join(kws)
+    out = [f"『{joined}』の全DB総当たり: {total}件ヒット" + (f"（#{channel}内）" if channel else "")]
+    if total == 0:
+        out.append("→ テキスト上に該当なし。画像/スクショ・DM・口頭/LINE上の可能性。")
+    for r in rows:
+        when = datetime.fromtimestamp(float(r["ts"]), JST).strftime("%m/%d")
+        snip = " ".join((r["text"] or "").split())[:110]
+        link = f" <{r['permalink']}|開く>" if r.get("permalink") else ""
+        out.append(f"[{when}] #{r['channel_name']} {r['user_name']}: {snip}{link}")
+    return "\n".join(out)
+
+
 def run_email_aggregate(
     question: str,
     storage: Storage,

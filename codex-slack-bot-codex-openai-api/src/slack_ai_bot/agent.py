@@ -13,7 +13,7 @@ import json
 import logging
 import re
 
-from .aggregate import query_emails
+from .aggregate import grep_messages, query_emails
 from .config import Settings
 from .openai_client import OpenAIClient
 from .search import message_datetime_jst, search_messages, today_jst
@@ -32,10 +32,14 @@ _INSTRUCTIONS = (
     '- 検索: {"action":"search","query":"検索語"}\n'
     '- メール集計: {"action":"query_emails","person":"人名/ハンドル","direction":"sent|received|any",'
     '"counterpart":"相手の会社やドメイン(任意)","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD","mode":"count|list"}\n'
+    '- 全DB総当たり: {"action":"grep","keywords":["語1","語2"],"mode":"or|and","channel":"任意"}\n'
     '- 最終回答: {"action":"final","answer":"日本語の回答"}\n\n'
     "ツールの説明:\n"
     "- search: 意味検索。関連メッセージを[n]付きで返す。『何を/なぜ/どうなってる/経緯』など内容系に使う。"
     "ただし上位数件しか見えないので『件数・網羅』には使わない。\n"
+    "- grep: 指定キーワードで *DB全体* を総当たり（LIKE）し、総ヒット数と該当を返す。"
+    "『〜という話あった？/どこかにある？/〇〇という語は使われてる？』の“存在確認・網羅”はこれを使う。"
+    "0件なら本当に無い（テキスト上）と断定してよい。語を変えて複数回試すとよい。\n"
     "- query_emails: 転送メールを重複除去してDB全体から正確に集計/列挙する。"
     "『何件/合計/一覧/どこ宛て/誰から/それぞれの内容』は必ずこれを使う。"
     "person は調べたい社内の人（未指定可）、counterpart は相手先で絞る時に使う。"
@@ -51,9 +55,13 @@ _INSTRUCTIONS = (
     "- 数の集計は query_emails(count) の数字だけを使い、自分で数え直さない。日付・数を推測で作らない。\n"
     "- counterpart は相手のドメイン/アドレスの一部（tanakaseni, kawashima, resourceful）や表示名の姓（田中）で指定すると当たりやすい。\n"
     "- 『〜という話あった？/どこかにある？/決めたっけ/項目案は？』など“存在確認・想起”の質問は、"
-    "一度で諦めず言い回しを変えて2〜3回 search する（別の語・略称・関連語で）。\n"
+    "まず grep で全DBを総当たりする（語を変えて2〜3回、別の語・略称・関連語で）。"
+    "grep が全て0件なら『記録（テキスト）には無い』と断定してよい。\n"
     "- 【最重要】本題に *直接* 一致する投稿だけを根拠にする。関係の薄い投稿を無理に結びつけて"
     "それらしく答えない（“ぱっと見でわかるやつが欲しい”のような別件を答えにしない）。\n"
+    "- 【最重要】grep/search の結果に *今聞かれている質問そのもの*（ほぼ同文の直近の投稿）が混ざることがある。"
+    "それは“過去にその話があった証拠”ではないので根拠にしない（質問のこだまを『はい残っています』の根拠にしない）。"
+    "それを除いて該当が無ければ『記録には無い』と答える。\n"
     "- 探しても該当が無ければ、正直に『記録（テキスト）には見当たらない』と答える。"
     "その上で、画像/スクショ・DM・口頭やLINE上で話された可能性に触れる。無関係な投稿でお茶を濁さない。\n"
     "- 箇条書き指定なら箇条書きで。十分な材料が集まったら final で簡潔かつ具体的に答える。"
@@ -187,6 +195,23 @@ def answer_with_agent(
                 last_tool = "email_count"
             else:
                 last_tool = "email_list"
+        elif kind == "grep":
+            kws = action.get("keywords") or ([action["query"]] if action.get("query") else [])
+            try:
+                obs = grep_messages(
+                    storage, [str(k) for k in kws],
+                    mode=str(action.get("mode", "or") or "or"),
+                    channel=str(action.get("channel", "") or ""),
+                    start_date=action.get("start_date") or None,
+                    end_date=action.get("end_date") or None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logging.exception("grep tool failed")
+                obs = f"(grepエラー: {exc})"
+            for url in re.findall(r"<(https?://[^|>]+)\|", obs):
+                if url not in email_refs:
+                    email_refs.append(url)
+            last_tool = "grep"
         else:
             obs = f"(未知のaction: {kind})"
         transcript += f"\n\n実行: {json.dumps(action, ensure_ascii=False)}\n観測:\n{obs[:6000]}"
